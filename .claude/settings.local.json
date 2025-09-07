@@ -1,0 +1,21 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//c/Users/richw/Downloads/**)",
+      "Bash(dir:*)",
+      "Bash(pnpm install:*)",
+      "Bash(npm install:*)",
+      "Bash(pnpm run lint:*)",
+      "Bash(pnpm test:*)",
+      "Bash(npx pnpm install:*)",
+      "Bash(npx tsx:*)",
+      "Bash(pnpm --filter server test)",
+      "Bash(pnpm --filter frontend test)",
+      "Bash(git init:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}
