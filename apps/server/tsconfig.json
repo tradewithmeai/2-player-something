@@ -13,7 +13,11 @@
     "strict": true,
     "skipLibCheck": true,
     "moduleResolution": "bundler",
-    "typeRoots": ["./src/types", "./node_modules/@types", "../../node_modules/@types"],
+    "typeRoots": [
+      "./src/types",
+      "./node_modules/@types",
+      "../../node_modules/@types"
+    ],
     "allowImportingTsExtensions": false
   },
   "include": ["src/**/*", "src/types/**/*.d.ts"],

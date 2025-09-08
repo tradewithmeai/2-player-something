@@ -20,29 +20,29 @@ const CLIENT_URL = process.env.CLIENT_URL || 'http://localhost:5173'
 
 const fastify = Fastify({
   logger: {
-    level: process.env.NODE_ENV === 'development' ? 'info' : 'warn'
-  }
+    level: process.env.NODE_ENV === 'development' ? 'info' : 'warn',
+  },
 })
 
 await fastify.register(cors, {
   origin: [CLIENT_URL, 'http://localhost:3000', 'http://localhost:5173'],
   methods: ['GET', 'POST'],
-  credentials: true
+  credentials: true,
 })
 
 await fastify.register(fastifySocketIO, {
   cors: {
     origin: [CLIENT_URL, 'http://localhost:3000', 'http://localhost:5173'],
     methods: ['GET', 'POST'],
-    credentials: true
-  }
+    credentials: true,
+  },
 })
 
 fastify.get('/health', async (_request, _reply) => {
-  return { 
-    status: 'ok', 
+  return {
+    status: 'ok',
     timestamp: new Date().toISOString(),
-    uptime: process.uptime()
+    uptime: process.uptime(),
   }
 })
 
@@ -51,24 +51,26 @@ const gameNamespace = fastify.io.of('/game')
 gameNamespace.on('connection', (socket: Socket) => {
   console.log(`Client connected to game namespace: ${socket.id}`)
 
-  socket.emit('welcome', { 
+  socket.emit('welcome', {
     message: 'Connected to game server',
     socketId: socket.id,
-    timestamp: new Date().toISOString()
+    timestamp: new Date().toISOString(),
   })
 
   socket.on('ping', (data: PingData) => {
     console.log('Received ping from', socket.id, data)
     const pongData: PongData = {
-      ...data, 
+      ...data,
       serverTime: new Date().toISOString(),
-      socketId: socket.id
+      socketId: socket.id,
     }
     socket.emit('pong', pongData)
   })
 
   socket.on('disconnect', (reason: string) => {
-    console.log(`Client disconnected from game namespace: ${socket.id}, reason: ${reason}`)
+    console.log(
+      `Client disconnected from game namespace: ${socket.id}, reason: ${reason}`
+    )
   })
 })
 
@@ -78,9 +80,9 @@ fastify.io.on('connection', (socket: Socket) => {
   socket.on('ping', (data: PingData) => {
     console.log('Received ping from', socket.id, data)
     const pongData: PongData = {
-      ...data, 
+      ...data,
       serverTime: new Date().toISOString(),
-      socketId: socket.id
+      socketId: socket.id,
     }
     socket.emit('pong', pongData)
   })

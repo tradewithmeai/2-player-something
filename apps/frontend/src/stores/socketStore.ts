@@ -36,38 +36,38 @@ export const useSocketStore = create<SocketState>((set, get) => ({
 
     socket.on('connect', () => {
       console.log('Connected to server:', socket.id)
-      set({ 
-        isConnected: true, 
+      set({
+        isConnected: true,
         connectionStatus: 'connected',
-        socket 
+        socket,
       })
     })
 
-    socket.on('disconnect', (reason) => {
+    socket.on('disconnect', reason => {
       console.log('Disconnected from server:', reason)
-      set({ 
-        isConnected: false, 
-        connectionStatus: 'disconnected' 
+      set({
+        isConnected: false,
+        connectionStatus: 'disconnected',
       })
     })
 
-    socket.on('connect_error', (error) => {
+    socket.on('connect_error', error => {
       console.error('Connection error:', error)
-      set({ 
-        isConnected: false, 
-        connectionStatus: 'error' 
+      set({
+        isConnected: false,
+        connectionStatus: 'error',
       })
     })
 
-    socket.on('welcome', (data) => {
+    socket.on('welcome', data => {
       console.log('Welcome message:', data)
     })
 
-    socket.on('pong', (data) => {
+    socket.on('pong', data => {
       console.log('Received pong:', data)
-      set({ 
+      set({
         lastPong: new Date().toISOString(),
-        serverTime: data.serverTime
+        serverTime: data.serverTime,
       })
     })
 
@@ -78,10 +78,10 @@ export const useSocketStore = create<SocketState>((set, get) => ({
     const { socket } = get()
     if (socket) {
       socket.disconnect()
-      set({ 
-        socket: null, 
-        isConnected: false, 
-        connectionStatus: 'disconnected' 
+      set({
+        socket: null,
+        isConnected: false,
+        connectionStatus: 'disconnected',
       })
     }
   },
@@ -91,10 +91,10 @@ export const useSocketStore = create<SocketState>((set, get) => ({
     if (socket && isConnected) {
       const pingData = {
         clientTime: new Date().toISOString(),
-        message: 'ping from client'
+        message: 'ping from client',
       }
       socket.emit('ping', pingData)
       console.log('Sent ping:', pingData)
     }
-  }
+  },
 }))

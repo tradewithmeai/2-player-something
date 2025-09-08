@@ -24,6 +24,7 @@ pnpm dev
 ```
 
 This will start:
+
 - Server on http://localhost:3001
 - Frontend on http://localhost:5173
 
@@ -65,11 +66,13 @@ pnpm format
 ### Tech Stack
 
 **Server:**
+
 - [Fastify](https://fastify.io/) - Web framework
 - [Socket.IO](https://socket.io/) - Real-time communication
 - [TypeScript](https://typescriptlang.org/) - Type safety
 
 **Frontend:**
+
 - [React](https://react.dev/) - UI framework
 - [Vite](https://vitejs.dev/) - Build tool
 - [Tailwind CSS](https://tailwindcss.com/) - Styling
@@ -77,6 +80,7 @@ pnpm format
 - [Socket.IO Client](https://socket.io/docs/v4/client-api/) - Real-time client
 
 **Development:**
+
 - [pnpm](https://pnpm.io/) - Package manager
 - [TypeScript](https://typescriptlang.org/) - Type checking
 - [ESLint](https://eslint.org/) - Code linting
@@ -108,6 +112,7 @@ pnpm test:watch
 Create `.env` files in the respective app directories:
 
 **Server** (`apps/server/.env`):
+
 ```env
 PORT=3001
 HOST=0.0.0.0
@@ -116,6 +121,7 @@ NODE_ENV=development
 ```
 
 **Frontend** (`apps/frontend/.env`):
+
 ```env
 VITE_SERVER_URL=http://localhost:3001
 ```
@@ -139,6 +145,7 @@ pnpm build
 ```
 
 This creates optimized builds in:
+
 - `apps/server/dist/` - Server build
 - `apps/frontend/dist/` - Frontend build
 

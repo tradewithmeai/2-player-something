@@ -10,7 +10,6 @@ interface PingData {
   message: string
 }
 
-
 describe('Socket.IO Integration', () => {
   let server: FastifyInstance
   let serverURL: string
@@ -18,7 +17,7 @@ describe('Socket.IO Integration', () => {
 
   beforeAll(async () => {
     server = Fastify({ logger: false })
-    
+
     await server.register(cors, {
       origin: true,
       methods: ['GET', 'POST'],
@@ -28,30 +27,30 @@ describe('Socket.IO Integration', () => {
       cors: {
         origin: true,
         methods: ['GET', 'POST'],
-      }
+      },
     })
 
     const gameNamespace = server.io.of('/game')
 
     gameNamespace.on('connection', (socket: Socket) => {
-      socket.emit('welcome', { 
+      socket.emit('welcome', {
         message: 'Connected to game server',
         socketId: socket.id,
-        timestamp: new Date().toISOString()
+        timestamp: new Date().toISOString(),
       })
 
       socket.on('ping', (data: PingData) => {
-        socket.emit('pong', { 
-          ...data, 
+        socket.emit('pong', {
+          ...data,
           serverTime: new Date().toISOString(),
-          socketId: socket.id
+          socketId: socket.id,
         })
       })
     })
 
     await server.ready()
     await server.listen({ port: 0, host: '127.0.0.1' })
-    
+
     const address = server.server.address()
     if (address && typeof address === 'object') {
       serverURL = `http://127.0.0.1:${address.port}`
@@ -80,7 +79,7 @@ describe('Socket.IO Integration', () => {
       const client = ioc(`${serverURL}/game`, {
         forceNew: true,
         autoConnect: true,
-        transports: ['websocket', 'polling']
+        transports: ['websocket', 'polling'],
       })
 
       connectedSockets.push(client)
@@ -89,7 +88,7 @@ describe('Socket.IO Integration', () => {
         expect(client.connected).toBe(true)
       })
 
-      client.on('welcome', (data) => {
+      client.on('welcome', data => {
         try {
           expect(data).toHaveProperty('message', 'Connected to game server')
           expect(data).toHaveProperty('socketId')
@@ -102,7 +101,7 @@ describe('Socket.IO Integration', () => {
         }
       })
 
-      client.on('connect_error', (err) => {
+      client.on('connect_error', err => {
         clearTimeout(timeout)
         reject(err)
       })
@@ -119,30 +118,30 @@ describe('Socket.IO Integration', () => {
       const client = ioc(`${serverURL}/game`, {
         forceNew: true,
         autoConnect: true,
-        transports: ['websocket', 'polling']
+        transports: ['websocket', 'polling'],
       })
 
       connectedSockets.push(client)
 
       const pingData = {
         clientTime: new Date().toISOString(),
-        message: 'test ping'
+        message: 'test ping',
       }
 
       client.on('connect', () => {
         client.emit('ping', pingData)
       })
 
-      client.on('pong', (data) => {
+      client.on('pong', data => {
         try {
           expect(data).toHaveProperty('clientTime', pingData.clientTime)
           expect(data).toHaveProperty('message', pingData.message)
           expect(data).toHaveProperty('serverTime')
           expect(data).toHaveProperty('socketId')
-          
+
           const serverTime = new Date(data.serverTime)
           expect(serverTime.getTime()).not.toBeNaN()
-          
+
           clearTimeout(timeout)
           resolve()
         } catch (err) {
@@ -151,7 +150,7 @@ describe('Socket.IO Integration', () => {
         }
       })
 
-      client.on('connect_error', (err) => {
+      client.on('connect_error', err => {
         clearTimeout(timeout)
         reject(err)
       })

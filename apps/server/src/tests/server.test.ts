@@ -8,7 +8,7 @@ describe('Server Health Check', () => {
 
   beforeAll(async () => {
     server = Fastify({ logger: false })
-    
+
     await server.register(cors, {
       origin: true,
       methods: ['GET', 'POST'],
@@ -18,14 +18,14 @@ describe('Server Health Check', () => {
       cors: {
         origin: true,
         methods: ['GET', 'POST'],
-      }
+      },
     })
 
     server.get('/health', async (_request, _reply) => {
-      return { 
-        status: 'ok', 
+      return {
+        status: 'ok',
         timestamp: new Date().toISOString(),
-        uptime: process.uptime()
+        uptime: process.uptime(),
       }
     })
 
@@ -39,11 +39,11 @@ describe('Server Health Check', () => {
   test('GET /health returns 200 and correct response', async () => {
     const response = await server.inject({
       method: 'GET',
-      url: '/health'
+      url: '/health',
     })
 
     expect(response.statusCode).toBe(200)
-    
+
     const body = JSON.parse(response.body)
     expect(body).toHaveProperty('status', 'ok')
     expect(body).toHaveProperty('timestamp')
@@ -54,7 +54,7 @@ describe('Server Health Check', () => {
   test('Health endpoint returns valid timestamp', async () => {
     const response = await server.inject({
       method: 'GET',
-      url: '/health'
+      url: '/health',
     })
 
     const body = JSON.parse(response.body)
