@@ -3,6 +3,12 @@ import Fastify, { FastifyInstance } from 'fastify'
 import cors from '@fastify/cors'
 import fastifySocketIO from 'fastify-socket.io'
 import { io as ioc, Socket as ClientSocket } from 'socket.io-client'
+import { Socket } from 'socket.io'
+
+interface PingData {
+  clientTime: string
+  message: string
+}
 
 
 describe('Socket.IO Integration', () => {
@@ -27,14 +33,14 @@ describe('Socket.IO Integration', () => {
 
     const gameNamespace = server.io.of('/game')
 
-    gameNamespace.on('connection', (socket) => {
+    gameNamespace.on('connection', (socket: Socket) => {
       socket.emit('welcome', { 
         message: 'Connected to game server',
         socketId: socket.id,
         timestamp: new Date().toISOString()
       })
 
-      socket.on('ping', (data) => {
+      socket.on('ping', (data: PingData) => {
         socket.emit('pong', { 
           ...data, 
           serverTime: new Date().toISOString(),

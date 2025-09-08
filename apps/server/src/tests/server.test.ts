@@ -21,7 +21,7 @@ describe('Server Health Check', () => {
       }
     })
 
-    server.get('/health', async (request, reply) => {
+    server.get('/health', async (_request, _reply) => {
       return { 
         status: 'ok', 
         timestamp: new Date().toISOString(),

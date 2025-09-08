@@ -1,8 +1,18 @@
 import Fastify from 'fastify'
 import cors from '@fastify/cors'
-import { Server as SocketIOServer } from 'socket.io'
 import fastifySocketIO from 'fastify-socket.io'
+import { Socket } from 'socket.io'
 import 'dotenv/config'
+
+interface PingData {
+  clientTime: string
+  message: string
+}
+
+interface PongData extends PingData {
+  serverTime: string
+  socketId: string
+}
 
 const PORT = parseInt(process.env.PORT || '3001', 10)
 const HOST = process.env.HOST || '0.0.0.0'
@@ -28,7 +38,7 @@ await fastify.register(fastifySocketIO, {
   }
 })
 
-fastify.get('/health', async (request, reply) => {
+fastify.get('/health', async (_request, _reply) => {
   return { 
     status: 'ok', 
     timestamp: new Date().toISOString(),
@@ -38,7 +48,7 @@ fastify.get('/health', async (request, reply) => {
 
 const gameNamespace = fastify.io.of('/game')
 
-gameNamespace.on('connection', (socket) => {
+gameNamespace.on('connection', (socket: Socket) => {
   console.log(`Client connected to game namespace: ${socket.id}`)
 
   socket.emit('welcome', { 
@@ -47,33 +57,35 @@ gameNamespace.on('connection', (socket) => {
     timestamp: new Date().toISOString()
   })
 
-  socket.on('ping', (data) => {
+  socket.on('ping', (data: PingData) => {
     console.log('Received ping from', socket.id, data)
-    socket.emit('pong', { 
+    const pongData: PongData = {
       ...data, 
       serverTime: new Date().toISOString(),
       socketId: socket.id
-    })
+    }
+    socket.emit('pong', pongData)
   })
 
-  socket.on('disconnect', (reason) => {
+  socket.on('disconnect', (reason: string) => {
     console.log(`Client disconnected from game namespace: ${socket.id}, reason: ${reason}`)
   })
 })
 
-fastify.io.on('connection', (socket) => {
+fastify.io.on('connection', (socket: Socket) => {
   console.log(`Client connected to default namespace: ${socket.id}`)
 
-  socket.on('ping', (data) => {
+  socket.on('ping', (data: PingData) => {
     console.log('Received ping from', socket.id, data)
-    socket.emit('pong', { 
+    const pongData: PongData = {
       ...data, 
       serverTime: new Date().toISOString(),
       socketId: socket.id
-    })
+    }
+    socket.emit('pong', pongData)
   })
 
-  socket.on('disconnect', (reason) => {
+  socket.on('disconnect', (reason: string) => {
     console.log(`Client disconnected: ${socket.id}, reason: ${reason}`)
   })
 })

@@ -12,17 +12,17 @@
     "test:watch": "vitest"
   },
   "dependencies": {
-    "fastify": "^4.26.2",
     "@fastify/cors": "^9.0.1",
-    "socket.io": "^4.7.5",
+    "dotenv": "^16.4.5",
+    "fastify": "^4.26.2",
     "fastify-socket.io": "^5.0.0",
-    "dotenv": "^16.4.5"
+    "socket.io": "^4.7.5"
   },
   "devDependencies": {
-    "@types/node": "^20.11.30",
+    "@types/node": "^20.19.13",
+    "socket.io-client": "^4.7.5",
     "tsx": "^4.7.1",
     "typescript": "^5.4.3",
-    "vitest": "^3.2.4",
-    "socket.io-client": "^4.7.5"
+    "vitest": "^3.2.4"
   }
 }
