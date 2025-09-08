@@ -23,7 +23,13 @@
       "Bash(gh run view:*)",
       "Bash(pnpm why:*)",
       "Bash(pnpm:*)",
-      "Bash(npm info:*)"
+      "Bash(npm info:*)",
+      "Bash(taskkill:*)",
+      "Bash(cmd /c:*)",
+      "Bash(curl:*)",
+      "Bash(vitest run:*)",
+      "Bash(npx vitest run:*)",
+      "Bash(rm:*)"
     ],
     "deny": [],
     "ask": []
