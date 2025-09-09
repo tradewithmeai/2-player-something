@@ -139,11 +139,11 @@ export function TicTacToeBoard({ className = '' }: TicTacToeBoardProps) {
           </div>
         ) : (
           <div className="space-y-2">
-            <div className="text-lg font-semibold">
-              {isMyTurn ? 'Your Turn' : 'Opponent\'s Turn'}
-            </div>
             <div className="text-sm text-gray-600">
-              You are: {mySeat === 'P1' ? 'X' : 'O'} ({mySeat})
+              You are: {mySeat === 'P1' ? 'X (P1)' : 'O (P2)'}
+            </div>
+            <div className="text-lg font-semibold">
+              Turn: {matchState.currentTurn}
             </div>
           </div>
         )}
@@ -174,14 +174,11 @@ export function TicTacToeBoard({ className = '' }: TicTacToeBoardProps) {
       {import.meta.env.DEV && (
         <div className="text-xs text-gray-500 max-w-md border-t pt-2 mt-4">
           <div className="font-mono space-x-4">
-            <span>Seat: <strong>{mySeat}</strong></span>
-            <span>Turn: <strong>{matchState.currentTurn}</strong></span>
-            <span>v: <strong>{matchState.version}</strong></span>
-          </div>
-          <div className="text-xs opacity-60 mt-1">
-            <span>Match: {matchState.id}</span>
-            <span className="ml-2">Pending: {pendingClaims.size}</span>
-            <span className="ml-2">Status: {matchState.status}</span>
+            <span>seat: {mySeat}</span>
+            <span>turn: {matchState.currentTurn}</span>
+            <span>version: {matchState.version}</span>
+            <span>finished: {isFinished ? 'true' : 'false'}</span>
+            <span>match: {matchState.id.split('_').pop()}</span>
           </div>
         </div>
       )}

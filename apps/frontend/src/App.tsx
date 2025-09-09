@@ -4,6 +4,7 @@ import { HomeScreen } from './components/HomeScreen'
 import { LobbyScreen } from './components/LobbyScreen'
 import { MatchScreen } from './components/MatchScreen'
 import { DevBanner } from './components/DevBanner'
+import { DevFooter } from './components/DevFooter'
 import { useSocketStore } from './stores/socketStore'
 
 function App() {
@@ -18,7 +19,7 @@ function App() {
     return (
       <>
         <DevBanner />
-        <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 p-4" style={{ paddingTop: process.env.NODE_ENV === 'development' ? '40px' : '16px' }}>
+        <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 p-4" style={{ paddingTop: process.env.NODE_ENV === 'development' ? '40px' : '16px', paddingBottom: process.env.NODE_ENV === 'development' ? '40px' : '16px' }}>
           <div className="container mx-auto max-w-4xl">
             <header className="text-center mb-8 pt-8">
               <h1 className="text-4xl font-bold text-gray-800 mb-2">
@@ -38,6 +39,7 @@ function App() {
             </footer>
           </div>
         </div>
+        <DevFooter />
       </>
     )
   }
@@ -47,9 +49,10 @@ function App() {
     return (
       <>
         <DevBanner />
-        <div style={{ paddingTop: process.env.NODE_ENV === 'development' ? '40px' : '0' }}>
+        <div style={{ paddingTop: process.env.NODE_ENV === 'development' ? '40px' : '0', paddingBottom: process.env.NODE_ENV === 'development' ? '40px' : '0' }}>
           <MatchScreen match={currentMatch} />
         </div>
+        <DevFooter />
       </>
     )
   }
@@ -58,9 +61,10 @@ function App() {
     return (
       <>
         <DevBanner />
-        <div style={{ paddingTop: process.env.NODE_ENV === 'development' ? '40px' : '0' }}>
+        <div style={{ paddingTop: process.env.NODE_ENV === 'development' ? '40px' : '0', paddingBottom: process.env.NODE_ENV === 'development' ? '40px' : '0' }}>
           <LobbyScreen room={currentRoom} />
         </div>
+        <DevFooter />
       </>
     )
   }
@@ -68,9 +72,10 @@ function App() {
   return (
     <>
       <DevBanner />
-      <div style={{ paddingTop: process.env.NODE_ENV === 'development' ? '40px' : '0' }}>
+      <div style={{ paddingTop: process.env.NODE_ENV === 'development' ? '40px' : '0', paddingBottom: process.env.NODE_ENV === 'development' ? '40px' : '0' }}>
         <HomeScreen />
       </div>
+      <DevFooter />
     </>
   )
 }

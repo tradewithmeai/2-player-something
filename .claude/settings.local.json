@@ -34,7 +34,10 @@
       "Bash(git --version)",
       "Bash(gh:*)",
       "Bash(git rev-parse:*)",
-      "Bash(git symbolic-ref:*)"
+      "Bash(git symbolic-ref:*)",
+      "Bash(git remote get-url:*)",
+      "Bash(git branch:*)",
+      "Bash(npx tsc:*)"
     ],
     "deny": [],
     "ask": []

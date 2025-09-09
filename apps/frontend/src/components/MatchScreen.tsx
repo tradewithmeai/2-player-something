@@ -7,13 +7,29 @@ interface MatchScreenProps {
 }
 
 export const MatchScreen: React.FC<MatchScreenProps> = ({ match }) => {
-  const { leaveRoom, matchState } = useSocketStore()
+  const { leaveRoom, matchState, mySeat } = useSocketStore()
   
   const currentPlayerId = useSocketStore(state => state.socket?.id)
-  const currentPlayer = match.players.find(p => p.id === currentPlayerId)
-  const opponent = match.players.find(p => p.id !== currentPlayerId)
+  
+  // Safely compute opponent from store state
+  const players = match.players || []
+  const currentPlayer = players.find(p => p.id === currentPlayerId)
+  
+  // Derive opponent seat and find opponent safely
+  const opponentSeat = mySeat === 'P1' ? 'P2' : 'P1'
+  const opponent = players.find(p => 
+    // First try to find by seat if seats are available
+    (p as any).seat === opponentSeat ||
+    // Fallback: find by "not me"
+    (p.id !== currentPlayerId)
+  )
+  
+  // Safe opponent ID extraction
+  const opponentId = opponent?.id
+  const opponentDisplay = opponentId?.slice(-6) ?? '—'
 
-  const formatDate = (date: string | Date) => {
+  const formatDate = (date: string | Date | undefined) => {
+    if (!date) return 'Unknown'
     const d = typeof date === 'string' ? new Date(date) : date
     return d.toLocaleString()
   }
@@ -73,7 +89,7 @@ export const MatchScreen: React.FC<MatchScreenProps> = ({ match }) => {
                   <span className="text-white font-bold text-lg">O</span>
                 </div>
                 <p className="text-white font-medium">Opponent</p>
-                <p className="text-red-400 text-sm">Player {opponent.id.slice(-4)}</p>
+                <p className="text-red-400 text-sm">Player {opponentDisplay}</p>
               </div>
             )}
           </div>

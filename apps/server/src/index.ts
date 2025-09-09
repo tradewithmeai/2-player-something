@@ -21,26 +21,8 @@ const matchService = new MatchService()
 // Track emitted results to ensure exactly-once emission
 const emittedResults = new Set<string>()
 
-const desiredPort = parseInt(process.env.PORT || '9001', 10)
+const PORT = process.env.NODE_ENV === 'development' ? 8890 : parseInt(process.env.PORT || '9001', 10)
 const HOST = process.env.HOST || '0.0.0.0'
-
-// Auto-port selection helper
-async function findFreePort(startPort: number, maxAttempts = 20): Promise<number> {
-  for (let i = 0; i < maxAttempts; i++) {
-    const port = startPort + i
-    try {
-      const testServer = Fastify({ logger: false })
-      await testServer.listen({ port, host: HOST })
-      await testServer.close()
-      console.log(JSON.stringify({ evt: 'server.port.selected', port, attempted: i + 1 }))
-      return port
-    } catch (err: any) {
-      if (err.code !== 'EADDRINUSE') throw err
-      // Continue to next port
-    }
-  }
-  throw new Error(`No free port found in range ${startPort}-${startPort + maxAttempts - 1}`)
-}
 
 const fastify = Fastify({
   logger: {
@@ -736,28 +718,24 @@ process.on('SIGINT', async () => {
 
 const start = async () => {
   try {
-    const PORT = await findFreePort(desiredPort)
     await fastify.listen({ port: PORT, host: HOST })
     
-    // Startup guardrails and logging
+    // Exact log format as requested
     console.log(JSON.stringify({
-      evt: 'server.startup.complete',
-      namespace: NAMESPACE,
+      evt: 'server.start',
       port: PORT,
-      host: HOST,
-      gameRegistryStats: GameRegistry.getStats(),
-      matchServiceStats: {
-        activeMatches: matchService.getActiveMatchCount(),
-        finishedMatches: matchService.getFinishedMatchCount()
-      },
-      timestamp: new Date().toISOString()
+      namespace: NAMESPACE
     }))
-    
-    console.log(`Server running at http://${HOST}:${PORT}`)
-    console.log(`Socket.IO server ready on ${NAMESPACE} namespace`)
-    console.log(`Single entrypoint confirmed - GameRegistry ready`)
-    console.log(`Debug endpoints: /debug/rooms, /debug/queue`)
-  } catch (err) {
+  } catch (err: any) {
+    if (err.code === 'EADDRINUSE') {
+      console.log(JSON.stringify({
+        evt: 'server.error',
+        error: 'EADDRINUSE',
+        port: PORT,
+        message: `Port ${PORT} is already in use`
+      }))
+      process.exit(1)
+    }
     fastify.log.error(err)
     process.exit(1)
   }
