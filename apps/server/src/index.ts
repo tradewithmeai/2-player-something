@@ -18,6 +18,9 @@ const roomManager = new RoomManager()
 const matchmaker = new Matchmaker()
 const matchService = new MatchService()
 
+// Track emitted results to ensure exactly-once emission
+const emittedResults = new Set<string>()
+
 const desiredPort = parseInt(process.env.PORT || '9001', 10)
 const HOST = process.env.HOST || '0.0.0.0'
 
@@ -597,22 +600,30 @@ gameNamespace.on('connection', (socket: Socket<ClientToServerEvents, ServerToCli
         version: result.matchState.version
       }))
 
-      // Check if game finished - emit result (spec) and gameResult (legacy)
-      if (result.matchState.status === 'finished') {
+      // Check if game finished - emit result exactly once
+      if (result.matchState.status === 'finished' && !emittedResults.has(matchId)) {
+        // Mark as emitted first to prevent double emission
+        emittedResults.add(matchId)
+        
         const resultData = {
           matchId,
           winner: result.matchState.winner,
           line: result.matchState.winningLine
         }
+        
+        // Emit result event (required by spec)
         gameNamespace.to(roomId).emit('result', resultData)
-        gameNamespace.to(roomId).emit('gameResult', resultData) // Legacy compatibility
-        console.log(JSON.stringify({ 
-          evt: 'emit.result.sent', 
-          roomId, 
-          matchId, 
-          winner: result.matchState.winner, 
-          line: result.matchState.winningLine 
+        
+        // Log emit.result for structured logging
+        console.log(JSON.stringify({
+          evt: 'emit.result',
+          roomId,
+          matchId,
+          winner: result.matchState.winner
         }))
+        
+        // Legacy compatibility
+        gameNamespace.to(roomId).emit('gameResult', resultData)
       }
     } else {
       // Send rejection only to the requesting player

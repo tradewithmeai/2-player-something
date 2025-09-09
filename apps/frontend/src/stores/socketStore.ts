@@ -428,6 +428,13 @@ export const useSocketStore = create<SocketState>((set, get) => ({
     const handleGameResult = (data: { matchId: string; winner: 'P1' | 'P2' | 'draw' | null; line?: number[] | null; winningLine?: number[] | null }) => {
       console.log('Game result:', data)
       
+      // Log frontend.result.received for structured logging
+      console.log(JSON.stringify({
+        evt: 'frontend.result.received',
+        matchId: data.matchId,
+        winner: data.winner
+      }))
+      
       const state = get()
       const line = data.line || data.winningLine
       

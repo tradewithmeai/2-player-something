@@ -29,7 +29,12 @@
       "Bash(curl:*)",
       "Bash(vitest run:*)",
       "Bash(npx vitest run:*)",
-      "Bash(rm:*)"
+      "Bash(rm:*)",
+      "Bash(git remote add:*)",
+      "Bash(git --version)",
+      "Bash(gh:*)",
+      "Bash(git rev-parse:*)",
+      "Bash(git symbolic-ref:*)"
     ],
     "deny": [],
     "ask": []

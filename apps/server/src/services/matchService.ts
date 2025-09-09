@@ -169,11 +169,25 @@ export class MatchService {
     return await mutex.runExclusive(async () => {
       // Check if game is still active
       if (match.status !== 'active') {
+        // Log post-finish claim rejection  
+        console.log(JSON.stringify({
+          evt: 'claim.reject',
+          reason: 'match_finished',
+          matchId,
+          squareId
+        }))
         return { success: false, reason: 'match_finished' }
       }
 
       // Exactly-once result: no-op if winner already set or match finished (guardrail)
       if (match.winner !== null || match.finishedAt !== undefined) {
+        // Log post-finish claim rejection
+        console.log(JSON.stringify({
+          evt: 'claim.reject',
+          reason: 'match_finished',
+          matchId,
+          squareId
+        }))
         return { success: false, reason: 'match_finished' }
       }
 
@@ -241,12 +255,32 @@ export class MatchService {
         match.winner = playerSeat
         match.winningLine = winResult.line || null
         match.finishedAt = new Date()
+        
+        // Log result.decided for structured logging
+        console.log(JSON.stringify({
+          evt: 'result.decided',
+          matchId,
+          winner: playerSeat,
+          line: winResult.line || null,
+          version: match.version
+        }))
+        
         this.logClaimDecision({ evt: 'claim', matchId, squareId, seat: playerSeat, version: match.version, result: 'win' })
       } else if (match.moves.length === 9) {
         // Check for draw
         match.status = 'finished'
         match.winner = 'draw'
         match.finishedAt = new Date()
+        
+        // Log result.decided for structured logging
+        console.log(JSON.stringify({
+          evt: 'result.decided',
+          matchId,
+          winner: 'draw',
+          line: null,
+          version: match.version
+        }))
+        
         this.logClaimDecision({ evt: 'claim', matchId, squareId, seat: playerSeat, version: match.version, result: 'draw' })
       } else {
         this.logClaimDecision({ evt: 'claim', matchId, squareId, seat: playerSeat, version: match.version })
