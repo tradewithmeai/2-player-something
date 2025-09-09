@@ -118,6 +118,37 @@ interface SocketState {
 const SERVER_URL = import.meta.env.VITE_WS_URL || 'http://localhost:8002'
 const NAMESPACE = '/game'
 
+// Store helper functions
+export const getMySeat = (state: SocketState): 'P1' | 'P2' | null => {
+  return state.mySeat
+}
+
+export const getOppSeat = (state: SocketState): 'P1' | 'P2' | null => {
+  if (state.mySeat === 'P1') return 'P2'
+  if (state.mySeat === 'P2') return 'P1'
+  return null
+}
+
+export const getSymbol = (seat: 'P1' | 'P2' | null): string => {
+  if (seat === 'P1') return 'X'
+  if (seat === 'P2') return 'O'
+  return '—'
+}
+
+export const getPlayerShortId = (state: SocketState, seat: 'P1' | 'P2' | null): string => {
+  if (!seat || !state.currentMatch?.players) return '—'
+  
+  // Find player by seat (looking for seat property if available)
+  const player = state.currentMatch.players.find((p: any) => 
+    p.seat === seat || 
+    // Fallback: if no seat property, use positional logic
+    (seat === 'P1' && state.currentMatch?.players.indexOf(p) === 0) ||
+    (seat === 'P2' && state.currentMatch?.players.indexOf(p) === 1)
+  )
+  
+  return player?.id?.slice(-6) || '—'
+}
+
 // Store instance reference for handler access
 let storeInstance: any = null
 

@@ -1,4 +1,4 @@
-import { useSocketStore } from '../stores/socketStore'
+import { useSocketStore, getMySeat, getSymbol } from '../stores/socketStore'
 
 interface TicTacToeBoardProps {
   className?: string
@@ -176,7 +176,7 @@ export function TicTacToeBoard({ className = '' }: TicTacToeBoardProps) {
         ) : (
           <div className="space-y-2">
             <div className="text-sm text-gray-600">
-              You are: {mySeat === 'P1' ? 'X (P1)' : 'O (P2)'}
+              You are: {getSymbol(getMySeat(useSocketStore.getState()))} ({getMySeat(useSocketStore.getState()) ?? '—'})
             </div>
             {matchMode === 'simul' ? (
               <div className="text-lg font-semibold">
