@@ -28,6 +28,11 @@ export interface MatchState {
   winningLine: number[] | null
   startedAt: Date
   finishedAt?: Date
+  // Simul mode specific
+  mode: 'turn' | 'simul'
+  currentWindowId?: number
+  currentWindowStarter?: 'P1' | 'P2'
+  windowTimeout?: NodeJS.Timeout
 }
 
 export interface Move {
@@ -68,6 +73,34 @@ export interface RematchState {
   expires: Date
 }
 
+// Simultaneous mode interfaces
+export interface PendingClaim {
+  playerId: string
+  seat: 'P1' | 'P2'
+  selectionId: string
+  squareId: number
+  timestamp: Date
+}
+
+export interface WindowResult {
+  applied: Array<{ seat: 'P1' | 'P2', squareId: number, version: number }>
+  rejected: Array<{ seat: 'P1' | 'P2', squareId: number, reason: string, version: number }>
+}
+
+export interface WindowOpenData {
+  matchId: string
+  windowId: number
+  starterSeat: 'P1' | 'P2'
+  deadlineTs: number
+}
+
+export interface WindowCloseData {
+  matchId: string
+  windowId: number
+  applied: Array<{ seat: 'P1' | 'P2', squareId: number, version: number }>
+  rejected: Array<{ seat: 'P1' | 'P2', squareId: number, reason: string, version: number }>
+}
+
 export class MatchService {
   private matches = new Map<string, MatchState>()
   private matchMutexes = new Map<string, Mutex>()
@@ -75,9 +108,35 @@ export class MatchService {
   private rateLimits = new Map<string, Map<string, RateLimit>>() // matchId -> playerId -> RateLimit
   private rematchStates = new Map<string, RematchState>() // matchId -> RematchState
   private matchMode = process.env.MATCH_MODE || 'turn'
+  
+  // Simul mode specific
+  private pendingClaimBuffers = new Map<string, Map<'P1' | 'P2', PendingClaim>>() // matchId -> seat -> PendingClaim
+  private windowCounters = new Map<string, number>() // matchId -> windowId counter
+  private simulWindowMs = parseInt(process.env.SIMUL_WINDOW_MS || '500', 10)
+  private simulStarterAlternation = process.env.SIMUL_STARTER_ALTERNATION === 'true'
 
   getMatchMode(): string {
     return this.matchMode
+  }
+
+  getDebugInfo(matchId: string): { pendingClaims: Record<string, any> } | null {
+    const match = this.matches.get(matchId)
+    if (!match) return null
+
+    const buffer = this.pendingClaimBuffers.get(matchId)
+    const pendingClaims: Record<string, any> = {}
+    
+    if (buffer) {
+      for (const [seat, claim] of buffer.entries()) {
+        pendingClaims[seat] = {
+          selectionId: claim.selectionId,
+          squareId: claim.squareId,
+          timestamp: claim.timestamp.toISOString()
+        }
+      }
+    }
+
+    return { pendingClaims }
   }
 
   createMatch(roomId: string, players: string[]): MatchState {
@@ -98,6 +157,7 @@ export class MatchService {
       moves: [],
       version: 0,
       status: 'active',
+      mode: this.matchMode as 'turn' | 'simul',
       winner: null,
       winningLine: null,
       startedAt: new Date(),
@@ -116,6 +176,14 @@ export class MatchService {
         acceptedClaims: 0,
       })
     })
+    
+    // Initialize simul mode specific data structures
+    if (this.matchMode === 'simul') {
+      this.pendingClaimBuffers.set(matchId, new Map())
+      this.windowCounters.set(matchId, 0)
+      match.currentWindowId = 0
+      match.currentWindowStarter = 'P1'
+    }
 
     // Set atomic mapping in GameRegistry
     GameRegistry.setMatchRoom(matchId, roomId)
@@ -223,76 +291,387 @@ export class MatchService {
         return { success: false, reason: 'square_occupied' }
       }
 
-      // Check if it's the player's turn (seat-based)
-      if (match.currentTurn !== playerSeat) {
-        this.logClaimDecision({ evt: 'claim', matchId, squareId, seat: playerSeat, reason: 'not_your_turn', version: match.version })
-        return { success: false, reason: 'not_your_turn' }
+      // Handle mode-specific logic
+      if (match.mode === 'simul') {
+        // In simul mode, add to pending claim buffer instead of immediately applying
+        return this.handleSimulClaim(match, request, playerSeat)
+      } else {
+        // Turn-based mode
+        return this.handleTurnBasedClaim(match, request, playerSeat, selections)
       }
+    })
+  }
 
-      // Make the move
-      match.board[squareId] = playerSeat // Store seat (P1/P2) not playerId
-      match.version++
-      selections.add(selectionId)
+  private handleTurnBasedClaim(match: MatchState, request: ClaimRequest, playerSeat: 'P1' | 'P2', selections: Set<string>): ClaimResult {
+    const { matchId, squareId, selectionId, playerId } = request
 
-      const move: Move = {
+    // Turn-based mode: check if it's the player's turn (seat-based)
+    if (match.currentTurn !== playerSeat) {
+      this.logClaimDecision({ evt: 'claim', matchId, squareId, seat: playerSeat, reason: 'not_your_turn', version: match.version })
+      return { success: false, reason: 'not_your_turn' }
+    }
+
+    // Make the move immediately in turn-based mode
+    match.board[squareId] = playerSeat // Store seat (P1/P2) not playerId
+    match.version++
+    selections.add(selectionId)
+
+    const move: Move = {
+      playerId,
+      squareId,
+      selectionId,
+      timestamp: new Date(),
+    }
+    match.moves.push(move)
+
+    // Update rate limit
+    this.updateRateLimit(matchId, playerId, selectionId)
+
+    // Switch turns (seat-based)
+    match.currentTurn = match.currentTurn === 'P1' ? 'P2' : 'P1'
+
+    // Check for win
+    const winResult = this.checkWin(match, playerSeat)
+    if (winResult.won) {
+      match.status = 'finished'
+      match.winner = playerSeat
+      match.winningLine = winResult.line || null
+      match.finishedAt = new Date()
+      
+      // Log result.decided for structured logging
+      console.log(JSON.stringify({
+        evt: 'result.decided',
+        matchId,
+        winner: playerSeat,
+        line: winResult.line || null,
+        version: match.version
+      }))
+      
+      this.logClaimDecision({ evt: 'claim', matchId, squareId, seat: playerSeat, version: match.version, result: 'win' })
+    } else if (match.moves.length === 9) {
+      // Check for draw
+      match.status = 'finished'
+      match.winner = 'draw'
+      match.finishedAt = new Date()
+      
+      // Log result.decided for structured logging
+      console.log(JSON.stringify({
+        evt: 'result.decided',
+        matchId,
+        winner: 'draw',
+        line: null,
+        version: match.version
+      }))
+      
+      this.logClaimDecision({ evt: 'claim', matchId, squareId, seat: playerSeat, version: match.version, result: 'draw' })
+    } else {
+      this.logClaimDecision({ evt: 'claim', matchId, squareId, seat: playerSeat, version: match.version })
+    }
+
+    return {
+      success: true,
+      move,
+      matchState: { ...match },
+      nextTurn: match.status === 'active' ? match.currentTurn : undefined,
+    }
+  }
+
+  private handleSimulClaim(match: MatchState, request: ClaimRequest, playerSeat: 'P1' | 'P2'): ClaimResult {
+    const { matchId, squareId, selectionId, playerId } = request
+
+    // Add to pending claim buffer (last submitted wins per seat)
+    const buffer = this.pendingClaimBuffers.get(matchId)!
+    buffer.set(playerSeat, {
+      playerId,
+      seat: playerSeat,
+      selectionId,
+      squareId,
+      timestamp: new Date()
+    })
+
+    // Update rate limit
+    this.updateRateLimit(matchId, playerId, selectionId)
+
+    // Log claim received
+    console.log(JSON.stringify({
+      evt: 'window.collect',
+      matchId,
+      windowId: match.currentWindowId,
+      seat: playerSeat,
+      squareId,
+      selectionId,
+      timestamp: new Date().toISOString()
+    }))
+
+    // Return success (claim is buffered, not immediately applied)
+    return {
+      success: true,
+      move: {
         playerId,
         squareId,
         selectionId,
-        timestamp: new Date(),
+        timestamp: new Date()
+      },
+      matchState: { ...match }
+    }
+  }
+
+  // Method to be called by the main game loop to open a new simul window
+  openSimulWindow(matchId: string, onWindowClose?: (matchId: string, roomId: string) => void): WindowOpenData | null {
+    const match = this.matches.get(matchId)
+    if (!match || match.mode !== 'simul' || match.status !== 'active') {
+      return null
+    }
+
+    // Increment window ID
+    const windowId = this.windowCounters.get(matchId)! + 1
+    this.windowCounters.set(matchId, windowId)
+    match.currentWindowId = windowId
+
+    // Determine starter (alternating if configured)
+    const starterSeat = this.simulStarterAlternation && windowId % 2 === 0 ? 'P2' : 'P1'
+    match.currentWindowStarter = starterSeat
+
+    const deadlineTs = Date.now() + this.simulWindowMs
+
+    console.log(JSON.stringify({
+      evt: 'window.open',
+      matchId,
+      windowId,
+      starterSeat,
+      deadlineTs,
+      duration: this.simulWindowMs
+    }))
+
+    // Clear previous window's buffer
+    this.pendingClaimBuffers.get(matchId)!.clear()
+
+    // Set timeout to close window
+    if (match.windowTimeout) {
+      clearTimeout(match.windowTimeout)
+    }
+
+    match.windowTimeout = setTimeout(() => {
+      if (onWindowClose) {
+        onWindowClose(matchId, match.roomId)
+      } else {
+        this.closeSimulWindow(matchId)
       }
-      match.moves.push(move)
+    }, this.simulWindowMs)
 
-      // Update rate limit
-      this.updateRateLimit(matchId, playerId, selectionId)
+    return {
+      matchId,
+      windowId,
+      starterSeat,
+      deadlineTs
+    }
+  }
 
-      // Switch turns (seat-based)
-      match.currentTurn = match.currentTurn === 'P1' ? 'P2' : 'P1'
+  // Method to close the current simul window and resolve conflicts
+  closeSimulWindow(matchId: string): WindowCloseData | null {
+    const match = this.matches.get(matchId)
+    if (!match || match.mode !== 'simul' || match.status !== 'active') {
+      return null
+    }
 
-      // Check for win
-      const winResult = this.checkWin(match, playerSeat)
+    const buffer = this.pendingClaimBuffers.get(matchId)!
+    const windowId = match.currentWindowId!
+    const selections = this.processedSelections.get(matchId)!
+
+    console.log(JSON.stringify({
+      evt: 'window.resolve',
+      matchId,
+      windowId,
+      pendingClaims: Array.from(buffer.entries()).map(([seat, claim]) => ({
+        seat,
+        squareId: claim.squareId,
+        selectionId: claim.selectionId
+      }))
+    }))
+
+    const result = this.resolveWindowConflicts(match, buffer, selections)
+
+    console.log(JSON.stringify({
+      evt: 'window.apply',
+      matchId,
+      windowId,
+      applied: result.applied,
+      rejected: result.rejected
+    }))
+
+    console.log(JSON.stringify({
+      evt: 'window.close',
+      matchId,
+      windowId,
+      applied: result.applied.length,
+      rejected: result.rejected.length
+    }))
+
+    // Clear timeout and buffer
+    if (match.windowTimeout) {
+      clearTimeout(match.windowTimeout)
+      match.windowTimeout = undefined
+    }
+    buffer.clear()
+
+    return {
+      matchId,
+      windowId,
+      applied: result.applied,
+      rejected: result.rejected
+    }
+  }
+
+  private resolveWindowConflicts(match: MatchState, buffer: Map<'P1' | 'P2', PendingClaim>, selections: Set<string>): WindowResult {
+    const applied: Array<{ seat: 'P1' | 'P2', squareId: number, version: number }> = []
+    const rejected: Array<{ seat: 'P1' | 'P2', squareId: number, reason: string, version: number }> = []
+
+    // Get claims from buffer
+    const claims = Array.from(buffer.values())
+    if (claims.length === 0) {
+      return { applied, rejected }
+    }
+
+    // Group claims by square
+    const claimsBySquare = new Map<number, PendingClaim[]>()
+    for (const claim of claims) {
+      if (!claimsBySquare.has(claim.squareId)) {
+        claimsBySquare.set(claim.squareId, [])
+      }
+      claimsBySquare.get(claim.squareId)!.push(claim)
+    }
+
+    // Process each square
+    for (const [squareId, squareClaims] of claimsBySquare.entries()) {
+      // Check if square is already occupied
+      if (match.board[squareId] !== null) {
+        // Reject all claims for occupied square
+        for (const claim of squareClaims) {
+          rejected.push({
+            seat: claim.seat,
+            squareId: claim.squareId,
+            reason: 'square_occupied',
+            version: match.version
+          })
+        }
+        continue
+      }
+
+      if (squareClaims.length === 1) {
+        // Single claim: apply it
+        const claim = squareClaims[0]
+        this.applySingleClaim(match, claim, selections)
+        applied.push({
+          seat: claim.seat,
+          squareId: claim.squareId,
+          version: match.version
+        })
+      } else {
+        // Multiple claims for same square: apply one, reject others
+        const winnerClaim = this.selectWinnerClaim(squareClaims, match.currentWindowStarter!)
+        
+        // Apply winner
+        this.applySingleClaim(match, winnerClaim, selections)
+        applied.push({
+          seat: winnerClaim.seat,
+          squareId: winnerClaim.squareId,
+          version: match.version
+        })
+
+        // Reject others
+        for (const claim of squareClaims) {
+          if (claim !== winnerClaim) {
+            rejected.push({
+              seat: claim.seat,
+              squareId: claim.squareId,
+              reason: 'conflict_lost',
+              version: match.version
+            })
+          }
+        }
+      }
+    }
+
+    // Check for win/draw after all applications
+    this.checkMatchFinish(match)
+
+    return { applied, rejected }
+  }
+
+  private selectWinnerClaim(claims: PendingClaim[], currentWindowStarter: 'P1' | 'P2'): PendingClaim {
+    // Sort by timestamp (earlier wins)
+    claims.sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime())
+    
+    const earliest = claims[0]
+    
+    // If there's a clear timestamp winner, use it
+    if (claims.length === 1 || claims[1].timestamp.getTime() > earliest.timestamp.getTime()) {
+      return earliest
+    }
+
+    // Tie-breaker: current window starter wins
+    const starterClaim = claims.find(c => c.seat === currentWindowStarter)
+    return starterClaim || earliest
+  }
+
+  private applySingleClaim(match: MatchState, claim: PendingClaim, selections: Set<string>): void {
+    // Apply the claim
+    match.board[claim.squareId] = claim.seat
+    match.version++
+    selections.add(claim.selectionId)
+
+    const move: Move = {
+      playerId: claim.playerId,
+      squareId: claim.squareId,
+      selectionId: claim.selectionId,
+      timestamp: claim.timestamp,
+    }
+    match.moves.push(move)
+
+    this.logClaimDecision({ 
+      evt: 'claim', 
+      matchId: match.id, 
+      squareId: claim.squareId, 
+      seat: claim.seat, 
+      version: match.version 
+    })
+  }
+
+  private checkMatchFinish(match: MatchState): void {
+    // Check for win (check all seats since multiple moves might have been applied)
+    for (const seat of ['P1', 'P2'] as const) {
+      const winResult = this.checkWin(match, seat)
       if (winResult.won) {
         match.status = 'finished'
-        match.winner = playerSeat
+        match.winner = seat
         match.winningLine = winResult.line || null
         match.finishedAt = new Date()
         
-        // Log result.decided for structured logging
         console.log(JSON.stringify({
           evt: 'result.decided',
-          matchId,
-          winner: playerSeat,
+          matchId: match.id,
+          winner: seat,
           line: winResult.line || null,
           version: match.version
         }))
-        
-        this.logClaimDecision({ evt: 'claim', matchId, squareId, seat: playerSeat, version: match.version, result: 'win' })
-      } else if (match.moves.length === 9) {
-        // Check for draw
-        match.status = 'finished'
-        match.winner = 'draw'
-        match.finishedAt = new Date()
-        
-        // Log result.decided for structured logging
-        console.log(JSON.stringify({
-          evt: 'result.decided',
-          matchId,
-          winner: 'draw',
-          line: null,
-          version: match.version
-        }))
-        
-        this.logClaimDecision({ evt: 'claim', matchId, squareId, seat: playerSeat, version: match.version, result: 'draw' })
-      } else {
-        this.logClaimDecision({ evt: 'claim', matchId, squareId, seat: playerSeat, version: match.version })
+        return
       }
+    }
 
-      return {
-        success: true,
-        move,
-        matchState: { ...match },
-        nextTurn: match.status === 'active' ? match.currentTurn : undefined,
-      }
-    })
+    // Check for draw
+    if (match.moves.length === 9) {
+      match.status = 'finished'
+      match.winner = 'draw'
+      match.finishedAt = new Date()
+      
+      console.log(JSON.stringify({
+        evt: 'result.decided',
+        matchId: match.id,
+        winner: 'draw',
+        line: null,
+        version: match.version
+      }))
+    }
   }
 
   private checkWin(match: MatchState, seat: 'P1' | 'P2'): { won: boolean; line?: number[] } {
