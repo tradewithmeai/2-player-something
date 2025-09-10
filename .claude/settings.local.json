@@ -38,7 +38,20 @@
       "Bash(git remote get-url:*)",
       "Bash(git branch:*)",
       "Bash(npx tsc:*)",
-      "Bash(git tag:*)"
+      "Bash(git tag:*)",
+      "Bash(MATCH_MODE=simul pnpm test:simul)",
+      "Bash(VITE_MATCH_MODE=turn pnpm -C apps/frontend test)",
+      "Bash(VITE_MATCH_MODE=turn pnpm test -- apps/frontend/src/stores/simulMode.test.ts)",
+      "Bash(VITE_MATCH_MODE=simul pnpm test -- apps/frontend/src/stores/simulMode.test.ts)",
+      "Bash(MATCH_MODE=turn NODE_ENV=test pnpm test -- apps/server/src/tests/matchResultTests.test.ts)",
+      "Bash(MATCH_MODE=simul NODE_ENV=test pnpm test -- apps/server/src/tests/simulMode.test.ts)",
+      "Bash(set MATCH_MODE=turn)",
+      "Bash(playwright test:*)",
+      "Bash(pnpx playwright test:*)",
+      "Bash(npx playwright test:*)",
+      "Bash(powershell:*)",
+      "Bash(VITE_MATCH_MODE=simul pnpm test -- apps/frontend/src)",
+      "Bash(set VITE_MATCH_MODE=simul)"
     ],
     "deny": [],
     "ask": []

@@ -259,4 +259,8 @@ export class RoomManager {
   getQueueLength(): number {
     return this.quickMatchQueue.length
   }
+
+  getAllRooms(): Room[] {
+    return Array.from(this.rooms.values())
+  }
 }

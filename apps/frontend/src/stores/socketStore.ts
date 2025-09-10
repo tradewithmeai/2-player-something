@@ -378,19 +378,21 @@ const onSquareClaimed = (data: { matchId: string; squareId: number; by: string; 
   }
 }
 
-const onClaimRejected = (data: { matchId: string; squareId: number; reason: string; selectionId: string }) => {
-  console.log('Claim rejected:', data)
+const onClaimRejected = (data: any) => {
+  // Type assertion for Socket.IO event data
+  const typedData = data as { matchId: string; squareId: number; reason: string; selectionId: string }
+  console.log('Claim rejected:', typedData)
   const state = storeInstance.getState()
   
   // Remove the rejected pending claim
   const updatedPendingClaims = new Map(state.pendingClaims)
-  updatedPendingClaims.delete(data.selectionId)
+  updatedPendingClaims.delete(typedData.selectionId)
   
   // For simul mode, also clear pending simul claims if it matches
   const updatedPendingSimulClaims = new Map(state.pendingSimulClaims)
   if (state.mySeat) {
-    const myPendingClaim = updatedPendingSimulClaims.get(state.mySeat)
-    if (myPendingClaim && myPendingClaim.squareId === data.squareId) {
+    const myPendingClaim = updatedPendingSimulClaims.get(state.mySeat) as { squareId: number; selectionId: string } | undefined
+    if (myPendingClaim && myPendingClaim.squareId === typedData.squareId) {
       updatedPendingSimulClaims.delete(state.mySeat)
     }
   }

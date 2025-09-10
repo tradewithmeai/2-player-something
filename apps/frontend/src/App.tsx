@@ -45,7 +45,7 @@ function App() {
   }
 
   // Navigation based on current state
-  if (matchState || currentMatch) {
+  if (matchState && currentMatch) {
     return (
       <>
         <DevBanner />

@@ -28,8 +28,8 @@ export const MatchScreen: React.FC<MatchScreenProps> = ({ match }) => {
   const opponent = players.find(p => p.id !== currentPlayerId)
   
   // Use store helper for player ID display
-  const myShort = getPlayerShortId(currentPlayerId)
-  const oppShort = getPlayerShortId(opponent?.id)
+  const myShort = getPlayerShortId(state, mySeat)
+  const oppShort = getPlayerShortId(state, oppSeat)
 
   const formatDate = (date: string | Date | undefined) => {
     if (!date) return 'Unknown'

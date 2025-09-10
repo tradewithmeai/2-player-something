@@ -189,7 +189,7 @@ describe('Simul Mode Tests', () => {
       const match = matchService.createMatch('room1', players)
 
       // Simulate a winning scenario across multiple windows
-      // Window 1: P1 claims [0, 1], P2 claims [3, 4]
+      // Window 1: P1 claims square 0, P2 claims square 3
       matchService.openSimulWindow(match.id)
       
       await matchService.claimSquare({
@@ -201,16 +201,21 @@ describe('Simul Mode Tests', () => {
       
       await matchService.claimSquare({
         matchId: match.id,
-        playerId: 'player1',
-        squareId: 1,
-        selectionId: 'p1_2'
-      })
-      
-      await matchService.claimSquare({
-        matchId: match.id,
         playerId: 'player2',
         squareId: 3,
         selectionId: 'p2_1'
+      })
+
+      matchService.closeSimulWindow(match.id)
+
+      // Window 2: P1 claims square 1, P2 claims square 4
+      matchService.openSimulWindow(match.id)
+      
+      await matchService.claimSquare({
+        matchId: match.id,
+        playerId: 'player1',
+        squareId: 1,
+        selectionId: 'p1_2'
       })
       
       await matchService.claimSquare({
@@ -222,7 +227,7 @@ describe('Simul Mode Tests', () => {
 
       matchService.closeSimulWindow(match.id)
 
-      // Window 2: P1 completes winning line with square 2
+      // Window 3: P1 completes winning line with square 2
       matchService.openSimulWindow(match.id)
       
       await matchService.claimSquare({
@@ -239,6 +244,8 @@ describe('Simul Mode Tests', () => {
       expect(finalMatch?.status).toBe('finished')
       expect(finalMatch?.winner).toBe('P1')
       expect(finalMatch?.winningLine).toEqual([0, 1, 2])
+      expect(finalMatch?.finishedAt).toBeDefined()
+      expect(typeof finalMatch?.finishedAt?.toISOString()).toBe('string')
     })
   })
 })

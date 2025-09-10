@@ -4,6 +4,7 @@ import Fastify from 'fastify'
 import cors from '@fastify/cors'
 import fastifySocketIO from 'fastify-socket.io'
 import { MatchService } from '../services/matchService.js'
+import { waitForSocketEvent, waitForMultipleSocketEvents, getMode, skipIfNotMode } from './utils/testEvents.js'
 
 describe('Match Integration Tests - Race Conditions', () => {
   let fastify: any
@@ -13,6 +14,7 @@ describe('Match Integration Tests - Race Conditions', () => {
   // let roomManager: RoomManager  
   // let matchmaker: Matchmaker
   const clients: Socket[] = []
+  const playerIdMapping = new Map<string, string>()
 
   beforeAll(async () => {
     matchService = new MatchService()
@@ -28,16 +30,20 @@ describe('Match Integration Tests - Race Conditions', () => {
     const gameNamespace = fastify.io.of('/game')
     
     gameNamespace.on('connection', (socket: any) => {
-      const playerId = socket.id
+      // Assign player IDs based on connection order
+      const connectionCount = playerIdMapping.size
+      const playerId = connectionCount === 0 ? 'player1' : 'player2'
+      playerIdMapping.set(socket.id, playerId)
 
       socket.on('claimSquare', async (data: any) => {
         const { matchId, squareId, selectionId } = data
+        const mappedPlayerId = playerIdMapping.get(socket.id) || playerId
         
         const result = await matchService.claimSquare({
           matchId,
           squareId,
           selectionId,
-          playerId
+          playerId: mappedPlayerId
         })
 
         if (result.success && result.move && result.matchState) {
@@ -75,6 +81,7 @@ describe('Match Integration Tests - Race Conditions', () => {
   afterEach(() => {
     clients.forEach(client => client.disconnect())
     clients.length = 0
+    playerIdMapping.clear()
   })
 
   afterAll(async () => {
@@ -160,8 +167,10 @@ describe('Match Integration Tests - Race Conditions', () => {
               
               // Verify the match state
               const match = matchService.getMatch(matchId)
-              expect(match?.board[0]).toBe(claimedBy)
+              const expectedSeat = claimedBy === 'player1' ? 'P1' : 'P2'
+              expect(match?.board[0]).toBe(expectedSeat)
               expect(match?.moves).toHaveLength(1)
+              expect(match?.moves[0].playerId).toBe(claimedBy)
               
               clearTimeout(timeout)
               resolve()
@@ -244,137 +253,119 @@ describe('Match Integration Tests - Race Conditions', () => {
   })
 
   test('Version consistency during concurrent updates', async () => {
-    return new Promise<void>((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        reject(new Error('Test timeout'))
-      }, 10000)
+    if (skipIfNotMode('turn', 'Version consistency during concurrent updates')) {
+      return
+    }
 
-      const matchState = matchService.createMatch('room3', ['player1', 'player2'])
-      const matchId = matchState.id
+    const matchState = matchService.createMatch('room3', ['player1', 'player2'])
+    const matchId = matchState.id
 
-      const client1 = io(`${serverUrl}/game`, { autoConnect: true })
-      const client2 = io(`${serverUrl}/game`, { autoConnect: true })
-      clients.push(client1, client2)
+    const client1 = io(`${serverUrl}/game`, { autoConnect: true })
+    const client2 = io(`${serverUrl}/game`, { autoConnect: true })
+    clients.push(client1, client2)
 
-      const receivedVersions: number[] = []
-      let moveCount = 0
+    // Wait for both clients to connect
+    await Promise.all([
+      waitForSocketEvent(client1, 'connect'),
+      waitForSocketEvent(client2, 'connect')
+    ])
 
-      const checkMove = (data: any) => {
-        receivedVersions.push(data.version)
-        moveCount++
-        
-        // After 4 moves, check version consistency
-        if (moveCount === 8) { // 4 moves × 2 clients receiving each = 8 events
-          try {
-            // Versions should be sequential: 1, 1, 2, 2, 3, 3, 4, 4
-            const uniqueVersions = [...new Set(receivedVersions)].sort((a, b) => a - b)
-            expect(uniqueVersions).toEqual([1, 2, 3, 4])
-            
-            // Each version should appear exactly twice (once per client)
-            for (const version of uniqueVersions) {
-              const count = receivedVersions.filter(v => v === version).length
-              expect(count).toBe(2)
-            }
-            
-            clearTimeout(timeout)
-            resolve()
-          } catch (error) {
-            clearTimeout(timeout)
-            reject(error)
-          }
-        }
-      }
+    // Set up to wait for all 8 squareClaimed events (4 moves × 2 clients each)
+    const eventPromise = waitForMultipleSocketEvents([
+      { socket: client1, eventName: 'squareClaimed', count: 4 },
+      { socket: client2, eventName: 'squareClaimed', count: 4 }
+    ], { timeoutMs: 5000 })
 
-      client1.on('squareClaimed', checkMove)
-      client2.on('squareClaimed', checkMove)
+    // Make 4 alternating moves to test version consistency
+    const moves = [
+      { square: 0, player: 'player1', delay: 10 },
+      { square: 1, player: 'player2', delay: 60 },
+      { square: 2, player: 'player1', delay: 110 },
+      { square: 3, player: 'player2', delay: 160 }
+    ]
 
-      let connectedClients = 0
-      const checkBothConnected = () => {
-        connectedClients++
-        if (connectedClients === 2) {
-          // Make 4 alternating moves to test version consistency
-          const moves = [
-            { square: 0, player: 'player1', delay: 0 },
-            { square: 1, player: 'player2', delay: 50 },
-            { square: 2, player: 'player1', delay: 100 },
-            { square: 3, player: 'player2', delay: 150 }
-          ]
-
-          moves.forEach((move, index) => {
-            setTimeout(() => {
-              const client = move.player === 'player1' ? client1 : client2
-              client.emit('claimSquare', {
-                matchId,
-                squareId: move.square,
-                selectionId: `move-${index}`
-              })
-            }, move.delay)
-          })
-        }
-      }
-
-      client1.on('connect', checkBothConnected)
-      client2.on('connect', checkBothConnected)
+    moves.forEach((move, index) => {
+      setTimeout(() => {
+        const client = move.player === 'player1' ? client1 : client2
+        client.emit('claimSquare', {
+          matchId,
+          squareId: move.square,
+          selectionId: `move-${index}`
+        })
+      }, move.delay)
     })
+
+    const [client1Events, client2Events] = await eventPromise
+
+    // Collect all received versions
+    const allVersions = [...client1Events, ...client2Events].map(event => event.version)
+    
+    // Versions should be sequential: 1, 1, 2, 2, 3, 3, 4, 4
+    const uniqueVersions = [...new Set(allVersions)].sort((a, b) => a - b)
+    expect(uniqueVersions).toEqual([1, 2, 3, 4])
+    
+    // Each version should appear exactly twice (once per client)
+    for (const version of uniqueVersions) {
+      const count = allVersions.filter(v => v === version).length
+      expect(count).toBe(2)
+    }
   })
 
   test('Game result broadcast on win condition', async () => {
-    return new Promise<void>((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        reject(new Error('Test timeout'))
-      }, 5000)
+    if (skipIfNotMode('turn', 'Game result broadcast on win condition')) {
+      return
+    }
 
-      const matchState = matchService.createMatch('room4', ['player1', 'player2'])
-      const matchId = matchState.id
+    const matchState = matchService.createMatch('room4', ['player1', 'player2'])
+    const matchId = matchState.id
 
-      const client1 = io(`${serverUrl}/game`, { autoConnect: true })
-      const client2 = io(`${serverUrl}/game`, { autoConnect: true })
-      clients.push(client1, client2)
+    const client1 = io(`${serverUrl}/game`, { autoConnect: true })
+    const client2 = io(`${serverUrl}/game`, { autoConnect: true })
+    clients.push(client1, client2)
 
-      let gameResultsReceived = 0
+    // Wait for both clients to connect
+    await Promise.all([
+      waitForSocketEvent(client1, 'connect'),
+      waitForSocketEvent(client2, 'connect')
+    ])
 
-      const checkGameResult = (data: any) => {
-        gameResultsReceived++
-        expect(data.matchId).toBe(matchId)
-        expect(data.winner).toBe('player1')
-        expect(data.winningLine).toEqual([0, 1, 2]) // Top row
-        
-        if (gameResultsReceived === 2) { // Both clients should receive
-          clearTimeout(timeout)
-          resolve()
-        }
-      }
+    // Set up to wait for gameResult events on both clients
+    const gameResultPromise = waitForMultipleSocketEvents([
+      { socket: client1, eventName: 'gameResult', count: 1 },
+      { socket: client2, eventName: 'gameResult', count: 1 }
+    ], { timeoutMs: 5000 })
 
-      client1.on('gameResult', checkGameResult)
-      client2.on('gameResult', checkGameResult)
+    // Create a winning sequence for player1 (top row)
+    const winningMoves = [
+      { square: 0, client: client1, delay: 10 },   // player1
+      { square: 3, client: client2, delay: 60 },   // player2  
+      { square: 1, client: client1, delay: 110 },  // player1
+      { square: 4, client: client2, delay: 160 },  // player2
+      { square: 2, client: client1, delay: 210 }   // player1 wins
+    ]
 
-      let connectedClients = 0
-      const checkBothConnected = () => {
-        connectedClients++
-        if (connectedClients === 2) {
-          // Create a winning sequence for player1 (top row)
-          const winningMoves = [
-            { square: 0, client: client1, delay: 0 },   // player1
-            { square: 3, client: client2, delay: 50 },  // player2  
-            { square: 1, client: client1, delay: 100 }, // player1
-            { square: 4, client: client2, delay: 150 }, // player2
-            { square: 2, client: client1, delay: 200 }  // player1 wins
-          ]
-
-          winningMoves.forEach((move, index) => {
-            setTimeout(() => {
-              move.client.emit('claimSquare', {
-                matchId,
-                squareId: move.square,
-                selectionId: `win-move-${index}`
-              })
-            }, move.delay)
-          })
-        }
-      }
-
-      client1.on('connect', checkBothConnected)
-      client2.on('connect', checkBothConnected)
+    winningMoves.forEach((move, index) => {
+      setTimeout(() => {
+        move.client.emit('claimSquare', {
+          matchId,
+          squareId: move.square,
+          selectionId: `win-move-${index}`
+        })
+      }, move.delay)
     })
+
+    const [client1Results, client2Results] = await gameResultPromise
+
+    // Both clients should receive the same game result
+    const result1 = client1Results[0]
+    const result2 = client2Results[0]
+
+    expect(result1.matchId).toBe(matchId)
+    expect(result1.winner).toBe('P1') // Engine returns seat, not playerId
+    expect(result1.winningLine).toEqual([0, 1, 2]) // Top row
+
+    expect(result2.matchId).toBe(matchId)
+    expect(result2.winner).toBe('P1')
+    expect(result2.winningLine).toEqual([0, 1, 2])
   })
 })

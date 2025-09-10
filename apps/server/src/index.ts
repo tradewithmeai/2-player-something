@@ -7,7 +7,7 @@ import { RoomManager } from './services/roomManager.js'
 import { Matchmaker } from './services/matchmaker.js'
 import { MatchService } from './services/matchService.js'
 import { GameRegistry } from './services/gameRegistry.js'
-import { ClientToServerEvents, ServerToClientEvents } from './types/room.js'
+import { ClientToServerEvents, ServerToClientEvents, Room } from './types/room.js'
 
 // Single namespace constant
 export const NAMESPACE = '/game'
@@ -181,7 +181,7 @@ function ensureSocketInRoom(socket: any, roomId: string, context: string) {
 }
 
 // Helper function to emit matchStart with seat information for each player
-function emitMatchStartWithSeats(roomId: string, match: any, matchState: any) {
+function emitMatchStartWithSeats(roomId: string, matchState: any) {
   console.log(JSON.stringify({
     evt: 'match.start.begin',
     roomId,
@@ -191,7 +191,7 @@ function emitMatchStartWithSeats(roomId: string, match: any, matchState: any) {
   }))
   
   // Audit room membership before emitting
-  const socketsInRoom = auditSocketRoomMembership(roomId, 'matchStart')
+  auditSocketRoomMembership(roomId, 'matchStart')
   
   // Send personalized matchStart to each player with their seat assignment
   if (matchState.playerSeats) {
@@ -304,14 +304,30 @@ function handleWindowClose(matchId: string, roomId: string) {
   // Send updated match state
   const updatedMatch = matchService.getMatch(matchId)
   if (updatedMatch) {
-    gameNamespace.to(roomId).emit('stateSync', {
+    const stateEvent = {
       board: updatedMatch.board,
       moves: updatedMatch.moves,
       version: updatedMatch.version,
       currentTurn: updatedMatch.currentTurn,
       winner: updatedMatch.winner,
-      winningLine: updatedMatch.winningLine
-    })
+      winningLine: updatedMatch.winningLine,
+      ...(updatedMatch.status === 'finished' && {
+        finishedAt: updatedMatch.finishedAt?.toISOString(),
+        status: updatedMatch.status
+      })
+    }
+    gameNamespace.to(roomId).emit('stateSync', stateEvent)
+
+    // Log stateSync emission
+    if (updatedMatch.status === 'finished') {
+      console.log(JSON.stringify({
+        evt: 'emit.stateSync.finished',
+        matchId,
+        roomId,
+        winner: updatedMatch.winner,
+        version: updatedMatch.version
+      }))
+    }
 
     // Check if match finished
     if (updatedMatch.status === 'finished' && !emittedResults.has(matchId)) {
@@ -329,7 +345,8 @@ function handleWindowClose(matchId: string, roomId: string) {
         evt: 'emit.result',
         roomId,
         matchId,
-        winner: updatedMatch.winner
+        winner: updatedMatch.winner,
+        line: updatedMatch.winningLine
       }))
     } else if (updatedMatch.status === 'active') {
       // Start next window if match continues
@@ -377,12 +394,6 @@ gameNamespace.on('connection', (socket: Socket<ClientToServerEvents, ServerToCli
       })
       
       // Start the match immediately since both players are present
-      const match = {
-        roomId: room.id,
-        players: room.players,
-        startedAt: new Date()
-      }
-      
       // Create server-side match state for the game
       const matchState = matchService.createMatch(room.id, room.players.map(p => p.id))
       
@@ -390,7 +401,7 @@ gameNamespace.on('connection', (socket: Socket<ClientToServerEvents, ServerToCli
       roomManager.setMatchRoom(matchState.id, room.id)
       
       // Send initial match state with seat info to clients
-      emitMatchStartWithSeats(room.id, match, matchState)
+      emitMatchStartWithSeats(room.id, matchState)
       
       console.log(`Match started in room ${room.code} with matchId ${matchState.id}, players:`, room.players.map(p => p.id))
       
@@ -398,7 +409,7 @@ gameNamespace.on('connection', (socket: Socket<ClientToServerEvents, ServerToCli
       matchmaker.startWatchdog(room.id, () => {
         // Force both players to acknowledge they're in the room
         console.log(`Watchdog: Re-sending match start for room ${room.code}`)
-        emitMatchStartWithSeats(room.id, match, matchState)
+        emitMatchStartWithSeats(room.id, matchState)
       })
     }
   })
@@ -445,12 +456,6 @@ gameNamespace.on('connection', (socket: Socket<ClientToServerEvents, ServerToCli
       
       // Check if match should start
       if (room.status === 'active') {
-        const match = {
-          roomId: room.id,
-          players: room.players,
-          startedAt: new Date()
-        }
-        
         // Create MatchState for the tic-tac-toe game
         const playerIds = room.players.map(p => p.id)
         const matchState = matchService.createMatch(room.id, playerIds)
@@ -458,7 +463,7 @@ gameNamespace.on('connection', (socket: Socket<ClientToServerEvents, ServerToCli
         // Map matchId to roomId
         roomManager.setMatchRoom(matchState.id, room.id)
         
-        emitMatchStartWithSeats(room.id, match, matchState)
+        emitMatchStartWithSeats(room.id, matchState)
         console.log(`Match started in room ${room.code} with matchId ${matchState.id}`)
       }
     } else {
@@ -499,12 +504,6 @@ gameNamespace.on('connection', (socket: Socket<ClientToServerEvents, ServerToCli
       
       // Check if match should start
       if (room.status === 'active') {
-        const match = {
-          roomId: room.id,
-          players: room.players,
-          startedAt: new Date()
-        }
-        
         // Create MatchState for the tic-tac-toe game
         const playerIds = room.players.map(p => p.id)
         const matchState = matchService.createMatch(room.id, playerIds)
@@ -512,7 +511,7 @@ gameNamespace.on('connection', (socket: Socket<ClientToServerEvents, ServerToCli
         // Map matchId to roomId
         roomManager.setMatchRoom(matchState.id, room.id)
         
-        emitMatchStartWithSeats(room.id, match, matchState)
+        emitMatchStartWithSeats(room.id, matchState)
         console.log(`Match started in room ${room.code} (all players ready)`)
       }
     }
@@ -552,6 +551,7 @@ gameNamespace.on('connection', (socket: Socket<ClientToServerEvents, ServerToCli
 
     if (!matchId) {
       socket.emit('claimRejected', {
+        matchId: matchId || '',
         squareId,
         selectionId,
         reason: 'invalid_match'
@@ -591,7 +591,7 @@ gameNamespace.on('connection', (socket: Socket<ClientToServerEvents, ServerToCli
       // C) Fallback: infer from socket rooms (with warning)
       if (!roomId) {
         const socketRooms = Array.from(socket.rooms)
-        const knownRooms = roomManager.getAllRooms().map(r => r.id)
+        const knownRooms = roomManager.getAllRooms().map((r: Room) => r.id)
         const intersection = socketRooms.filter(r => knownRooms.includes(r))
         
         if (intersection.length > 0) {
@@ -682,16 +682,30 @@ gameNamespace.on('connection', (socket: Socket<ClientToServerEvents, ServerToCli
         version: result.matchState.version,
         currentTurn: result.matchState.currentTurn,
         winner: result.matchState.winner,
-        winningLine: result.matchState.winningLine
+        winningLine: result.matchState.winningLine,
+        ...(result.matchState.status === 'finished' && {
+          finishedAt: result.matchState.finishedAt?.toISOString(),
+          status: result.matchState.status
+        })
       }
       gameNamespace.to(roomId).emit('stateSync', stateEvent)
       
-      console.log(JSON.stringify({
-        evt: 'emit.stateSync',
-        matchId,
-        roomId,
-        version: result.matchState.version
-      }))
+      if (result.matchState.status === 'finished') {
+        console.log(JSON.stringify({
+          evt: 'emit.stateSync.finished',
+          matchId,
+          roomId,
+          winner: result.matchState.winner,
+          version: result.matchState.version
+        }))
+      } else {
+        console.log(JSON.stringify({
+          evt: 'emit.stateSync',
+          matchId,
+          roomId,
+          version: result.matchState.version
+        }))
+      }
 
       // Check if game finished - emit result exactly once
       if (result.matchState.status === 'finished' && !emittedResults.has(matchId)) {
@@ -712,7 +726,8 @@ gameNamespace.on('connection', (socket: Socket<ClientToServerEvents, ServerToCli
           evt: 'emit.result',
           roomId,
           matchId,
-          winner: result.matchState.winner
+          winner: result.matchState.winner,
+          line: result.matchState.winningLine
         }))
         
         // Legacy compatibility
@@ -737,7 +752,7 @@ gameNamespace.on('connection', (socket: Socket<ClientToServerEvents, ServerToCli
     }
   })
 
-  socket.on('rematch', async (data) => {
+  socket.on('rematch', async (data: { matchId: string }) => {
     const { matchId } = data
     
     console.log(JSON.stringify({
@@ -781,7 +796,7 @@ gameNamespace.on('connection', (socket: Socket<ClientToServerEvents, ServerToCli
           roomId: match.roomId, 
           players: match.players.map(pid => ({ id: pid, socketId: pid })), 
           startedAt: match.startedAt 
-        }, match)
+        })
         
         console.log(JSON.stringify({
           evt: 'rematch.start',
@@ -860,6 +875,11 @@ process.on('SIGINT', async () => {
 const start = async () => {
   try {
     await fastify.listen({ port: PORT, host: HOST })
+    
+    // Log test mode when in test environment
+    if (process.env.NODE_ENV === 'test') {
+      console.log(JSON.stringify({ evt: 'test.mode', mode: process.env.MATCH_MODE || 'turn' }))
+    }
     
     // Exact log format as requested
     console.log(JSON.stringify({

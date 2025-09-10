@@ -1,18 +1,10 @@
 import { Mutex } from 'async-mutex'
 import { v4 as uuidv4 } from 'uuid'
 import { GameRegistry } from './gameRegistry.js'
+import { GameEngine } from '../engine/types.js'
+import { TicTacToeEngine } from '../engine/tictactoeEngine.js'
 
-// Precomputed winning triplets (indices for 3x3 board)
-const WINNING_LINES = [
-  [0, 1, 2], // Top row
-  [3, 4, 5], // Middle row
-  [6, 7, 8], // Bottom row
-  [0, 3, 6], // Left column
-  [1, 4, 7], // Middle column
-  [2, 5, 8], // Right column
-  [0, 4, 8], // Diagonal top-left to bottom-right
-  [2, 4, 6], // Diagonal top-right to bottom-left
-]
+// Note: Winning line logic now handled by GameEngine
 
 export interface MatchState {
   id: string
@@ -20,7 +12,7 @@ export interface MatchState {
   board: (string | null)[] // 9 squares, null = empty, seat (P1/P2) = claimed
   players: string[] // [player1Id, player2Id]
   playerSeats: Map<string, 'P1' | 'P2'> // playerId -> seat mapping
-  currentTurn: 'P1' | 'P2' // seat of current turn (not playerId)
+  currentTurn: 'P1' | 'P2' | null // seat of current turn (not playerId), null when finished
   moves: Move[]
   version: number
   status: 'active' | 'finished'
@@ -108,12 +100,30 @@ export class MatchService {
   private rateLimits = new Map<string, Map<string, RateLimit>>() // matchId -> playerId -> RateLimit
   private rematchStates = new Map<string, RematchState>() // matchId -> RematchState
   private matchMode = process.env.MATCH_MODE || 'turn'
+  private engine: GameEngine
   
   // Simul mode specific
   private pendingClaimBuffers = new Map<string, Map<'P1' | 'P2', PendingClaim>>() // matchId -> seat -> PendingClaim
   private windowCounters = new Map<string, number>() // matchId -> windowId counter
   private simulWindowMs = parseInt(process.env.SIMUL_WINDOW_MS || '500', 10)
   private simulStarterAlternation = process.env.SIMUL_STARTER_ALTERNATION === 'true'
+
+  constructor() {
+    // Initialize engine based on ENGINE_KIND (default to tictactoe)
+    const engineKind = process.env.ENGINE_KIND || 'tictactoe'
+    if (engineKind === 'tictactoe') {
+      this.engine = new TicTacToeEngine()
+    } else {
+      // Default to tictactoe for any unknown engine types
+      this.engine = new TicTacToeEngine()
+    }
+    
+    // Log engine selection
+    console.log(JSON.stringify({
+      evt: 'engine.selected',
+      kind: 'tictactoe'
+    }))
+  }
 
   getMatchMode(): string {
     return this.matchMode
@@ -147,21 +157,24 @@ export class MatchService {
     playerSeats.set(players[0], 'P1')
     playerSeats.set(players[1], 'P2')
     
+    // Initialize game state using engine
+    const engineState = this.engine.initState()
+    
     const match: MatchState = {
       id: matchId,
       roomId,
-      board: Array(9).fill(null),
+      board: engineState.board,
       players: [...players],
       playerSeats,
-      currentTurn: 'P1', // P1 always starts
+      currentTurn: engineState.currentTurn,
       moves: [],
-      version: 0,
+      version: engineState.version,
       status: 'active',
       mode: this.matchMode as 'turn' | 'simul',
-      winner: null,
-      winningLine: null,
+      winner: engineState.winner,
+      winningLine: engineState.winningLine,
       startedAt: new Date(),
-      finishedAt: undefined
+      finishedAt: engineState.finishedAt
     }
 
     this.matches.set(matchId, match)
@@ -254,7 +267,10 @@ export class MatchService {
           evt: 'claim.reject',
           reason: 'match_finished',
           matchId,
-          squareId
+          squareId,
+          currentStatus: match.status,
+          currentWinner: match.winner,
+          finishedAt: match.finishedAt?.toISOString()
         }))
         return { success: false, reason: 'match_finished' }
       }
@@ -279,16 +295,26 @@ export class MatchService {
         return { success: false, reason: 'cap_reached' }
       }
 
-      // Validate square ID
-      if (squareId < 0 || squareId > 8) {
-        this.logClaimDecision({ evt: 'claim', matchId, squareId, seat: playerSeat, reason: 'invalid_square', version: match.version })
-        return { success: false, reason: 'invalid_square' }
+      // Validate using engine (but skip turn validation for simul mode)
+      const engineState = {
+        board: match.board,
+        currentTurn: match.currentTurn,
+        winner: match.winner,
+        winningLine: match.winningLine,
+        version: match.version,
+        finishedAt: match.finishedAt
       }
-
-      // Check if square is already claimed
-      if (match.board[squareId] !== null) {
-        this.logClaimDecision({ evt: 'claim', matchId, squareId, seat: playerSeat, reason: 'square_occupied', version: match.version })
-        return { success: false, reason: 'square_occupied' }
+      
+      // Use engine validation but handle mode-specific logic
+      const validation = this.engine.validateClaim(engineState, playerSeat, squareId)
+      if (!validation.valid) {
+        // Skip 'not_your_turn' validation for simul mode (handled differently)
+        if (validation.reason === 'not_your_turn' && match.mode === 'simul') {
+          // Allow the claim to proceed for simul mode buffering
+        } else {
+          this.logClaimDecision({ evt: 'claim', matchId, squareId, seat: playerSeat, reason: validation.reason!, version: match.version })
+          return { success: false, reason: validation.reason! }
+        }
       }
 
       // Handle mode-specific logic
@@ -305,15 +331,30 @@ export class MatchService {
   private handleTurnBasedClaim(match: MatchState, request: ClaimRequest, playerSeat: 'P1' | 'P2', selections: Set<string>): ClaimResult {
     const { matchId, squareId, selectionId, playerId } = request
 
-    // Turn-based mode: check if it's the player's turn (seat-based)
-    if (match.currentTurn !== playerSeat) {
-      this.logClaimDecision({ evt: 'claim', matchId, squareId, seat: playerSeat, reason: 'not_your_turn', version: match.version })
-      return { success: false, reason: 'not_your_turn' }
+    // Create engine state from match
+    const engineState = {
+      board: match.board,
+      currentTurn: match.currentTurn,
+      winner: match.winner,
+      winningLine: match.winningLine,
+      version: match.version,
+      finishedAt: match.finishedAt
     }
 
-    // Make the move immediately in turn-based mode
-    match.board[squareId] = playerSeat // Store seat (P1/P2) not playerId
-    match.version++
+    // Validate claim using engine
+    const validation = this.engine.validateClaim(engineState, playerSeat, squareId)
+    if (!validation.valid) {
+      this.logClaimDecision({ evt: 'claim', matchId, squareId, seat: playerSeat, reason: validation.reason!, version: match.version })
+      return { success: false, reason: validation.reason! }
+    }
+
+    // Apply claim using engine
+    const claimApplication = this.engine.applyClaim(engineState, playerSeat, squareId)
+    
+    // Update match state with engine results
+    match.board = claimApplication.board
+    match.version = claimApplication.version
+    match.currentTurn = claimApplication.nextTurn
     selections.add(selectionId)
 
     const move: Move = {
@@ -327,43 +368,34 @@ export class MatchService {
     // Update rate limit
     this.updateRateLimit(matchId, playerId, selectionId)
 
-    // Switch turns (seat-based)
-    match.currentTurn = match.currentTurn === 'P1' ? 'P2' : 'P1'
-
-    // Check for win
-    const winResult = this.checkWin(match, playerSeat)
-    if (winResult.won) {
+    // Check for game result using engine
+    const updatedEngineState = {
+      ...engineState,
+      board: claimApplication.board,
+      version: claimApplication.version,
+      currentTurn: claimApplication.nextTurn
+    }
+    const gameResult = this.engine.checkResult(updatedEngineState)
+    if (gameResult.status === 'finished') {
+      // Set match state BEFORE emitting any events
       match.status = 'finished'
-      match.winner = playerSeat
-      match.winningLine = winResult.line || null
+      match.winner = gameResult.winner!
+      match.winningLine = gameResult.winningLine || null
       match.finishedAt = new Date()
+      match.currentTurn = null // Set to null when finished
       
       // Log result.decided for structured logging
       console.log(JSON.stringify({
         evt: 'result.decided',
         matchId,
-        winner: playerSeat,
-        line: winResult.line || null,
-        version: match.version
+        winner: gameResult.winner!,
+        line: gameResult.winningLine || null,
+        version: match.version,
+        finishedAt: match.finishedAt.toISOString()
       }))
       
-      this.logClaimDecision({ evt: 'claim', matchId, squareId, seat: playerSeat, version: match.version, result: 'win' })
-    } else if (match.moves.length === 9) {
-      // Check for draw
-      match.status = 'finished'
-      match.winner = 'draw'
-      match.finishedAt = new Date()
-      
-      // Log result.decided for structured logging
-      console.log(JSON.stringify({
-        evt: 'result.decided',
-        matchId,
-        winner: 'draw',
-        line: null,
-        version: match.version
-      }))
-      
-      this.logClaimDecision({ evt: 'claim', matchId, squareId, seat: playerSeat, version: match.version, result: 'draw' })
+      const resultType = gameResult.winner === 'draw' ? 'draw' : 'win'
+      this.logClaimDecision({ evt: 'claim', matchId, squareId, seat: playerSeat, version: match.version, result: resultType })
     } else {
       this.logClaimDecision({ evt: 'claim', matchId, squareId, seat: playerSeat, version: match.version })
     }
@@ -372,7 +404,7 @@ export class MatchService {
       success: true,
       move,
       matchState: { ...match },
-      nextTurn: match.status === 'active' ? match.currentTurn : undefined,
+      nextTurn: match.status === 'active' && match.currentTurn ? match.currentTurn : undefined,
     }
   }
 
@@ -638,50 +670,55 @@ export class MatchService {
   }
 
   private checkMatchFinish(match: MatchState): void {
-    // Check for win (check all seats since multiple moves might have been applied)
-    for (const seat of ['P1', 'P2'] as const) {
-      const winResult = this.checkWin(match, seat)
-      if (winResult.won) {
-        match.status = 'finished'
-        match.winner = seat
-        match.winningLine = winResult.line || null
-        match.finishedAt = new Date()
-        
-        console.log(JSON.stringify({
-          evt: 'result.decided',
-          matchId: match.id,
-          winner: seat,
-          line: winResult.line || null,
-          version: match.version
-        }))
-        return
-      }
+    // Use engine to check game result
+    const engineState = {
+      board: match.board,
+      currentTurn: match.currentTurn,
+      winner: match.winner,
+      winningLine: match.winningLine,
+      version: match.version,
+      finishedAt: match.finishedAt
+    }
+    
+    const gameResult = this.engine.checkResult(engineState)
+    if (gameResult.status === 'finished') {
+      // Set match state BEFORE emitting any events
+      match.status = 'finished'
+      match.winner = gameResult.winner!
+      match.winningLine = gameResult.winningLine || null
+      match.finishedAt = new Date()
+      match.currentTurn = null // Set to null when finished
+      
+      console.log(JSON.stringify({
+        evt: 'result.decided',
+        matchId: match.id,
+        winner: gameResult.winner!,
+        line: gameResult.winningLine || null,
+        version: match.version,
+        finishedAt: match.finishedAt.toISOString()
+      }))
+      return
     }
 
-    // Check for draw
+    // If not finished but would be draw case, handle it (this check should not be needed with proper engine)
     if (match.moves.length === 9) {
+      // Set match state BEFORE emitting any events
       match.status = 'finished'
       match.winner = 'draw'
       match.finishedAt = new Date()
+      match.currentTurn = null // Set to null when finished
       
       console.log(JSON.stringify({
         evt: 'result.decided',
         matchId: match.id,
         winner: 'draw',
         line: null,
-        version: match.version
+        version: match.version,
+        finishedAt: match.finishedAt.toISOString()
       }))
     }
   }
 
-  private checkWin(match: MatchState, seat: 'P1' | 'P2'): { won: boolean; line?: number[] } {
-    for (const line of WINNING_LINES) {
-      if (line.every(index => match.board[index] === seat)) {
-        return { won: true, line }
-      }
-    }
-    return { won: false }
-  }
 
   private checkRateLimit(matchId: string, playerId: string): boolean {
     const matchLimits = this.rateLimits.get(matchId)
@@ -753,7 +790,7 @@ export class MatchService {
     return match.version === version
   }
 
-  async requestRematch(request: RematchRequest): Promise<{ type: 'waiting' | 'matched', newMatchId?: string }> {
+  async requestRematch(request: RematchRequest): Promise<{ type: 'waiting' | 'matched' | 'timeout', newMatchId?: string }> {
     const { matchId, playerId } = request
     
     const match = this.matches.get(matchId)

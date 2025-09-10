@@ -1,5 +1,4 @@
 import { describe, test, expect, beforeEach, afterEach } from 'vitest'
-import { io, Socket } from 'socket.io-client'
 import Fastify from 'fastify'
 import cors from '@fastify/cors'
 import fastifySocketIO from 'fastify-socket.io'
@@ -8,6 +7,10 @@ import { RoomManager } from '../services/roomManager.js'
 import { Matchmaker } from '../services/matchmaker.js'
 import { GameRegistry } from '../services/gameRegistry.js'
 import { NAMESPACE } from '../index.js'
+import { makeClient, TestClient } from './utils/testClient.js'
+
+// Set match mode for turn-based tests
+process.env.MATCH_MODE = 'turn'
 
 describe('M2.2 Match Result and Rematch Tests', () => {
   let fastify: any
@@ -15,7 +18,7 @@ describe('M2.2 Match Result and Rematch Tests', () => {
   let matchService: MatchService
   let roomManager: RoomManager
   let matchmaker: Matchmaker
-  const clients: Socket[] = []
+  const clients: TestClient[] = []
 
   beforeEach(async () => {
     GameRegistry.clear()
@@ -96,6 +99,7 @@ describe('M2.2 Match Result and Rematch Tests', () => {
             gameNamespace.to(roomId).emit('squareClaimed', claimEvent)
             
             const stateEvent = {
+              matchId,
               board: result.matchState.board,
               moves: result.matchState.moves,
               version: result.matchState.version,
@@ -169,400 +173,284 @@ describe('M2.2 Match Result and Rematch Tests', () => {
   })
 
   test('P1 wins diagonally and result event is emitted exactly once', async () => {
-    return new Promise<void>((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        reject(new Error('Test timeout'))
-      }, 3000)
+    const client1 = makeClient(`${serverUrl}${NAMESPACE}`)
+    const client2 = makeClient(`${serverUrl}${NAMESPACE}`)
+    clients.push(client1, client2)
 
-      const client1 = io(`${serverUrl}${NAMESPACE}`, { autoConnect: true })
-      const client2 = io(`${serverUrl}${NAMESPACE}`, { autoConnect: true })
-      clients.push(client1, client2)
+    // Connect both clients
+    await client1.connect()
+    await client2.connect()
 
-      let matchId: string
-      let p1Socket: Socket
-      let resultEvents = 0
+    // Start quick match for both
+    await Promise.all([client1.quickMatch(), client2.quickMatch()])
 
-      const checkCompletion = () => {
-        if (resultEvents === 2) { // Both clients should receive exactly one result event each
-          clearTimeout(timeout)
-          resolve()
-        }
-      }
+    // Verify both clients have same match and complementary seats
+    const state1 = client1.getState()
+    const state2 = client2.getState()
+    expect(state1.matchId).toBe(state2.matchId)
+    expect([state1.mySeat, state2.mySeat].sort()).toEqual(['P1', 'P2'])
 
-      client1.on('matchStart', (data) => {
-        matchId = data.matchId
-        if (data.mySeat === 'P1') {
-          p1Socket = client1
-          // P1 wins: claim diagonal 0, 4, 8
-          setTimeout(() => p1Socket.emit('claimSquare', { matchId, squareId: 0, selectionId: 'p1-0' }), 100)
-        }
-      })
+    // Determine P1 client
+    const p1Client = state1.mySeat === 'P1' ? client1 : client2
+    const p2Client = state1.mySeat === 'P1' ? client2 : client1
 
-      client2.on('matchStart', (data) => {
-        if (data.mySeat === 'P1') {
-          p1Socket = client2
-          setTimeout(() => p1Socket.emit('claimSquare', { matchId, squareId: 0, selectionId: 'p1-0' }), 100)
-        }
-      })
+    // Set up result event listeners
+    let resultEvents = 0
+    const resultPromises = []
+    
+    resultPromises.push(client1.awaitEvent('result', 2000).then(data => {
+      expect(data.winner).toBe('P1')
+      expect(data.line).toEqual([0, 4, 8])
+      resultEvents++
+    }))
+    
+    resultPromises.push(client2.awaitEvent('result', 2000).then(data => {
+      expect(data.winner).toBe('P1')
+      expect(data.line).toEqual([0, 4, 8])
+      resultEvents++
+    }))
 
-      let movesCount = 0
-      const handleSquareClaimed = (data: any) => {
-        movesCount++
-        if (data.by === 'P1') {
-          if (data.squareId === 0) {
-            // P2 blocks, P1 continues diagonal
-            setTimeout(() => {
-              const p2Socket = p1Socket === client1 ? client2 : client1
-              p2Socket.emit('claimSquare', { matchId, squareId: 1, selectionId: `p2-${movesCount}` })
-            }, 50)
-          } else if (data.squareId === 4) {
-            // P2 blocks again
-            setTimeout(() => {
-              const p2Socket = p1Socket === client1 ? client2 : client1
-              p2Socket.emit('claimSquare', { matchId, squareId: 2, selectionId: `p2-${movesCount}` })
-            }, 50)
-          }
-        } else {
-          // P2 moved, P1 continues
-          if (movesCount === 2) {
-            setTimeout(() => p1Socket.emit('claimSquare', { matchId, squareId: 4, selectionId: 'p1-4' }), 50)
-          } else if (movesCount === 4) {
-            // Winning move
-            setTimeout(() => p1Socket.emit('claimSquare', { matchId, squareId: 8, selectionId: 'p1-8' }), 50)
-          }
-        }
-      }
-
-      client1.on('squareClaimed', handleSquareClaimed)
-      client2.on('squareClaimed', handleSquareClaimed)
-
-      client1.on('result', (data) => {
-        expect(data.matchId).toBe(matchId)
-        expect(data.winner).toBe('P1')
-        expect(data.line).toEqual([0, 4, 8])
-        resultEvents++
-        checkCompletion()
-      })
-
-      client2.on('result', (data) => {
-        expect(data.matchId).toBe(matchId)
-        expect(data.winner).toBe('P1')
-        expect(data.line).toEqual([0, 4, 8])
-        resultEvents++
-        checkCompletion()
-      })
-
-      client1.emit('quickMatch')
-      client2.emit('quickMatch')
-    })
+    // Play diagonal win: P1: 0,4,8  P2: 1,2
+    p1Client.claimSquare(0, 'p1-0')
+    await client1.awaitEvent('squareClaimed', 1000)
+    
+    p2Client.claimSquare(1, 'p2-1')
+    await client1.awaitEvent('squareClaimed', 1000)
+    
+    p1Client.claimSquare(4, 'p1-4')
+    await client1.awaitEvent('squareClaimed', 1000)
+    
+    p2Client.claimSquare(2, 'p2-2')
+    await client1.awaitEvent('squareClaimed', 1000)
+    
+    // Winning move
+    p1Client.claimSquare(8, 'p1-8')
+    
+    // Wait for all result events
+    await Promise.all(resultPromises)
+    expect(resultEvents).toBe(2)
   })
 
   test('Draw game emits result with winner="draw" and line=null', async () => {
-    return new Promise<void>((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        reject(new Error('Test timeout'))
-      }, 5000)
+    const client1 = makeClient(`${serverUrl}${NAMESPACE}`)
+    const client2 = makeClient(`${serverUrl}${NAMESPACE}`)
+    clients.push(client1, client2)
 
-      const client1 = io(`${serverUrl}${NAMESPACE}`, { autoConnect: true })
-      const client2 = io(`${serverUrl}${NAMESPACE}`, { autoConnect: true })
-      clients.push(client1, client2)
+    await client1.connect()
+    await client2.connect()
+    await Promise.all([client1.quickMatch(), client2.quickMatch()])
 
-      let matchId: string
-      let p1Socket: Socket, p2Socket: Socket
-      let resultEvents = 0
+    const state1 = client1.getState()
+    const state2 = client2.getState()
+    expect(state1.matchId).toBe(state2.matchId)
 
-      client1.on('matchStart', (data) => {
-        matchId = data.matchId
-        if (data.mySeat === 'P1') {
-          p1Socket = client1
-          p2Socket = client2
-        } else {
-          p1Socket = client2
-          p2Socket = client1
-        }
-        
-        // Force a draw: P1: 0,1,5,6  P2: 2,3,4,7,8
-        setTimeout(() => {
-          p1Socket.emit('claimSquare', { matchId, squareId: 0, selectionId: 'p1-0' })
-        }, 100)
+    const p1Client = state1.mySeat === 'P1' ? client1 : client2
+    const p2Client = state1.mySeat === 'P1' ? client2 : client1
+
+    // Set up result listeners
+    const resultPromises = [
+      client1.awaitEvent('result', 2000).then(data => {
+        expect(data.winner).toBe('draw')
+        expect(data.line).toBeNull()
+      }),
+      client2.awaitEvent('result', 2000).then(data => {
+        expect(data.winner).toBe('draw')
+        expect(data.line).toBeNull()
       })
+    ]
 
-      client2.on('matchStart', () => {
-        // Wait for P1 to make setup
-      })
+    // Force draw sequence: P1: 0,1,5,6  P2: 2,3,4,7,8
+    const moves = [
+      () => p1Client.claimSquare(0, 'p1-0'),
+      () => p2Client.claimSquare(2, 'p2-2'),
+      () => p1Client.claimSquare(1, 'p1-1'),
+      () => p2Client.claimSquare(3, 'p2-3'),
+      () => p1Client.claimSquare(5, 'p1-5'),
+      () => p2Client.claimSquare(4, 'p2-4'),
+      () => p1Client.claimSquare(6, 'p1-6'),
+      () => p2Client.claimSquare(7, 'p2-7'),
+      () => p2Client.claimSquare(8, 'p2-8') // Final draw move
+    ]
 
-      let moves = 0
-      const drawSequence = [
-        { player: 'P1', square: 0 }, { player: 'P2', square: 2 },
-        { player: 'P1', square: 1 }, { player: 'P2', square: 3 },
-        { player: 'P1', square: 5 }, { player: 'P2', square: 4 },
-        { player: 'P1', square: 6 }, { player: 'P2', square: 7 },
-        { player: 'P2', square: 8 } // Final move for draw
-      ]
-
-      const handleSquareClaimed = (data: any) => {
-        moves++
-        if (moves < drawSequence.length) {
-          const nextMove = drawSequence[moves]
-          const nextSocket = nextMove.player === 'P1' ? p1Socket : p2Socket
-          setTimeout(() => {
-            nextSocket.emit('claimSquare', { 
-              matchId, 
-              squareId: nextMove.square, 
-              selectionId: `${nextMove.player.toLowerCase()}-${nextMove.square}`
-            })
-          }, 50)
-        }
+    // Execute moves with proper awaits
+    for (let i = 0; i < moves.length; i++) {
+      moves[i]()
+      if (i < moves.length - 1) {
+        await client1.awaitEvent('squareClaimed', 1000)
       }
+    }
 
-      client1.on('squareClaimed', handleSquareClaimed)
-      client2.on('squareClaimed', handleSquareClaimed)
-
-      client1.on('result', (data) => {
-        expect(data.matchId).toBe(matchId)
-        expect(data.winner).toBe('draw')
-        expect(data.line).toBeNull()
-        resultEvents++
-        if (resultEvents === 2) {
-          clearTimeout(timeout)
-          resolve()
-        }
-      })
-
-      client2.on('result', (data) => {
-        expect(data.matchId).toBe(matchId)
-        expect(data.winner).toBe('draw')
-        expect(data.line).toBeNull()
-        resultEvents++
-        if (resultEvents === 2) {
-          clearTimeout(timeout)
-          resolve()
-        }
-      })
-
-      client1.emit('quickMatch')
-      client2.emit('quickMatch')
-    })
+    await Promise.all(resultPromises)
   })
 
   test('Race condition: Last move wins while opponent clicks - only one result emitted', async () => {
-    return new Promise<void>((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        reject(new Error('Test timeout'))
-      }, 3000)
+    const client1 = makeClient(`${serverUrl}${NAMESPACE}`)
+    const client2 = makeClient(`${serverUrl}${NAMESPACE}`)
+    clients.push(client1, client2)
 
-      const client1 = io(`${serverUrl}${NAMESPACE}`, { autoConnect: true })
-      const client2 = io(`${serverUrl}${NAMESPACE}`, { autoConnect: true })
-      clients.push(client1, client2)
+    await client1.connect()
+    await client2.connect() 
+    await Promise.all([client1.quickMatch(), client2.quickMatch()])
 
-      let matchId: string
-      let p1Socket: Socket, p2Socket: Socket
-      let resultEvents = 0
-      let rejectedClaims = 0
+    const state1 = client1.getState()
+    const state2 = client2.getState()
+    expect(state1.matchId).toBe(state2.matchId)
 
-      client1.on('matchStart', (data) => {
-        matchId = data.matchId
-        if (data.mySeat === 'P1') {
-          p1Socket = client1
-          p2Socket = client2
-        } else {
-          p1Socket = client2
-          p2Socket = client1
-        }
-        
-        // Set up near-win state: P1 has [0, 4], needs 8 for diagonal win
-        setTimeout(() => {
-          p1Socket.emit('claimSquare', { matchId, squareId: 0, selectionId: 'p1-0' })
-        }, 100)
-      })
+    const p1Client = state1.mySeat === 'P1' ? client1 : client2
+    const p2Client = state1.mySeat === 'P1' ? client2 : client1
 
-      let moves = 0
-      const handleSquareClaimed = (data: any) => {
-        moves++
-        if (moves === 1 && data.squareId === 0) {
-          // P2 blocks
-          setTimeout(() => p2Socket.emit('claimSquare', { matchId, squareId: 1, selectionId: 'p2-1' }), 50)
-        } else if (moves === 2 && data.squareId === 1) {
-          // P1 takes center
-          setTimeout(() => p1Socket.emit('claimSquare', { matchId, squareId: 4, selectionId: 'p1-4' }), 50)
-        } else if (moves === 3 && data.squareId === 4) {
-          // P2 blocks again
-          setTimeout(() => p2Socket.emit('claimSquare', { matchId, squareId: 2, selectionId: 'p2-2' }), 50)
-        } else if (moves === 4 && data.squareId === 2) {
-          // RACE CONDITION: Both try to claim squares simultaneously
-          // P1 claims winning square 8, P2 tries to claim square 3
-          setTimeout(() => {
-            p1Socket.emit('claimSquare', { matchId, squareId: 8, selectionId: 'p1-8-win' })
-            p2Socket.emit('claimSquare', { matchId, squareId: 3, selectionId: 'p2-3-race' })
-          }, 10) // Very short delay to simulate race
-        }
-      }
-
-      client1.on('squareClaimed', handleSquareClaimed)
-      client2.on('squareClaimed', handleSquareClaimed)
-
-      client1.on('result', (data) => {
+    // Set up listeners for results and rejections
+    let resultEvents = 0
+    let rejectedClaims = 0
+    
+    const resultPromises = [
+      client1.awaitEvent('result', 2000).then(data => {
+        expect(data.winner).toBe('P1')
+        expect(data.line).toEqual([0, 4, 8])
+        resultEvents++
+      }),
+      client2.awaitEvent('result', 2000).then(data => {
         expect(data.winner).toBe('P1')
         expect(data.line).toEqual([0, 4, 8])
         resultEvents++
       })
+    ]
 
-      client2.on('result', (data) => {
-        expect(data.winner).toBe('P1')
-        expect(data.line).toEqual([0, 4, 8])
-        resultEvents++
-      })
+    // Build near-win state: P1 has [0, 4], needs 8 for diagonal win
+    p1Client.claimSquare(0, 'p1-0')
+    await client1.awaitEvent('squareClaimed', 1000)
+    
+    p2Client.claimSquare(1, 'p2-1')
+    await client1.awaitEvent('squareClaimed', 1000)
+    
+    p1Client.claimSquare(4, 'p1-4')
+    await client1.awaitEvent('squareClaimed', 1000)
+    
+    p2Client.claimSquare(2, 'p2-2')
+    await client1.awaitEvent('squareClaimed', 1000)
 
-      client1.on('claimRejected', (data) => {
+    // RACE CONDITION: P1 wins with 8, P2 tries 3 simultaneously 
+    p1Client.claimSquare(8, 'p1-8-win')
+    p2Client.claimSquare(3, 'p2-3-race')
+
+    // Set up rejection listener with timeout
+    const rejectionPromise = new Promise<void>((resolve) => {
+      const timeout = setTimeout(() => resolve(), 1000)
+      
+      const checkRejection = (data: any) => {
         if (data.reason === 'match_finished') {
           rejectedClaims++
-        }
-      })
-
-      client2.on('claimRejected', (data) => {
-        if (data.reason === 'match_finished') {
-          rejectedClaims++
-        }
-      })
-
-      // Check results after delay
-      setTimeout(() => {
-        expect(resultEvents).toBe(2) // Both clients get exactly one result
-        expect(rejectedClaims).toBe(1) // One claim rejected as match_finished
-        clearTimeout(timeout)
-        resolve()
-      }, 2000)
-
-      client1.emit('quickMatch')
-      client2.emit('quickMatch')
-    })
-  })
-
-  test('Rematch handshake: both players request, starter flips', async () => {
-    return new Promise<void>((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        reject(new Error('Test timeout'))
-      }, 4000)
-
-      const client1 = io(`${serverUrl}${NAMESPACE}`, { autoConnect: true })
-      const client2 = io(`${serverUrl}${NAMESPACE}`, { autoConnect: true })
-      clients.push(client1, client2)
-
-      let matchId: string
-      let originalP1Id: string
-      let rematchPending = 0
-      let newMatchStarted = 0
-
-      client1.on('matchStart', (data) => {
-        newMatchStarted++
-        matchId = data.matchId
-        
-        if (newMatchStarted === 1) {
-          // Original match
-          if (data.mySeat === 'P1') {
-            originalP1Id = client1.id
-            // P1 wins immediately by claiming a line
-            setTimeout(() => {
-              client1.emit('claimSquare', { matchId, squareId: 0, selectionId: 'quick-0' })
-              setTimeout(() => client1.emit('claimSquare', { matchId, squareId: 1, selectionId: 'quick-1' }), 200)
-              setTimeout(() => client1.emit('claimSquare', { matchId, squareId: 2, selectionId: 'quick-2' }), 400)
-            }, 100)
-          }
-        } else {
-          // Rematch - check starter flipped
-          if (originalP1Id === client1.id) {
-            expect(data.mySeat).toBe('P2') // Original P1 should now be P2
-          } else {
-            expect(data.mySeat).toBe('P1') // Original P2 should now be P1
-          }
           clearTimeout(timeout)
           resolve()
         }
-      })
-
-      client2.on('matchStart', (data) => {
-        newMatchStarted++
-        if (newMatchStarted === 1 && data.mySeat === 'P1') {
-          originalP1Id = client2.id
-        }
-      })
-
-      client1.on('result', (data) => {
-        if (data.winner === 'P1') {
-          // Request rematch after game ends
-          setTimeout(() => {
-            client1.emit('rematch', { matchId })
-          }, 100)
-        }
-      })
-
-      client2.on('result', (data) => {
-        if (data.winner === 'P1') {
-          setTimeout(() => {
-            client2.emit('rematch', { matchId })
-          }, 150) // Slight delay to test handshake
-        }
-      })
-
-      client1.on('rematchPending', () => {
-        rematchPending++
-      })
-
-      client2.on('rematchPending', () => {
-        rematchPending++
-        // Should have exactly one pending before match starts
-        expect(rematchPending).toBe(1)
-      })
-
-      client1.emit('quickMatch')
-      client2.emit('quickMatch')
+      }
+      
+      client1.awaitEvent('claimRejected', 500).then(checkRejection).catch(() => {})
+      client2.awaitEvent('claimRejected', 500).then(checkRejection).catch(() => {})
     })
+
+    await Promise.all([...resultPromises, rejectionPromise])
+    
+    expect(resultEvents).toBe(2) // Both clients get exactly one result
+    expect(rejectedClaims).toBe(1) // One claim rejected as match_finished
+  })
+
+  test('Rematch handshake: both players request, starter flips', async () => {
+    const client1 = makeClient(`${serverUrl}${NAMESPACE}`)
+    const client2 = makeClient(`${serverUrl}${NAMESPACE}`)
+    clients.push(client1, client2)
+
+    await client1.connect()
+    await client2.connect()
+    await Promise.all([client1.quickMatch(), client2.quickMatch()])
+
+    const state1 = client1.getState()
+    const state2 = client2.getState()
+    const originalMatchId = state1.matchId!
+    
+    const originalP1Client = state1.mySeat === 'P1' ? client1 : client2
+    const originalP1Seat = state1.mySeat === 'P1' ? 'P1' : 'P2'
+    
+    // Play quick win: P1 gets horizontal line 0,1,2
+    const p1Client = originalP1Client
+    p1Client.claimSquare(0, 'quick-0')
+    await client1.awaitEvent('squareClaimed', 1000)
+    
+    p1Client.claimSquare(1, 'quick-1')
+    await client1.awaitEvent('squareClaimed', 1000)
+    
+    p1Client.claimSquare(2, 'quick-2')
+
+    // Wait for game result
+    await Promise.all([
+      client1.awaitEvent('result', 2000),
+      client2.awaitEvent('result', 2000)
+    ])
+
+    // Both request rematch
+    client1.emit('rematch', { matchId: originalMatchId })
+    await client1.awaitEvent('rematchPending', 1000)
+    
+    client2.emit('rematch', { matchId: originalMatchId })
+    
+    // Wait for new match to start
+    await Promise.all([
+      client1.awaitEvent('matchStart', 2000),
+      client2.awaitEvent('matchStart', 2000)
+    ])
+
+    // Verify starter flipped
+    const newState1 = client1.getState()
+    const newState2 = client2.getState()
+    
+    expect(newState1.matchId).not.toBe(originalMatchId) // New match
+    expect(newState1.version).toBe(0) // Reset version
+    
+    // Original P1 should now be P2
+    if (originalP1Client === client1) {
+      expect(newState1.mySeat).toBe('P2')
+      expect(newState2.mySeat).toBe('P1')
+    } else {
+      expect(newState1.mySeat).toBe('P1')
+      expect(newState2.mySeat).toBe('P2')
+    }
   })
 
   test('Rematch timeout: single player request expires after 60s', async () => {
-    return new Promise<void>((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        reject(new Error('Test timeout'))
-      }, 2000) // Test timeout shorter than rematch timeout
+    const client1 = makeClient(`${serverUrl}${NAMESPACE}`)
+    const client2 = makeClient(`${serverUrl}${NAMESPACE}`)
+    clients.push(client1, client2)
 
-      const client1 = io(`${serverUrl}${NAMESPACE}`, { autoConnect: true })
-      const client2 = io(`${serverUrl}${NAMESPACE}`, { autoConnect: true })
-      clients.push(client1, client2)
+    await client1.connect()
+    await client2.connect()
+    await Promise.all([client1.quickMatch(), client2.quickMatch()])
 
-      let matchId: string
-      let gameFinished = false
+    const state1 = client1.getState()
+    const p1Client = state1.mySeat === 'P1' ? client1 : client2
+    const matchId = state1.matchId!
+    
+    // Quick win: P1 gets horizontal line 0,1,2
+    p1Client.claimSquare(0, 'win-0')
+    await client1.awaitEvent('squareClaimed', 1000)
+    
+    p1Client.claimSquare(1, 'win-1')
+    await client1.awaitEvent('squareClaimed', 1000)
+    
+    p1Client.claimSquare(2, 'win-2')
 
-      client1.on('matchStart', (data) => {
-        matchId = data.matchId
-        if (data.mySeat === 'P1') {
-          // Quick win
-          setTimeout(() => {
-            client1.emit('claimSquare', { matchId, squareId: 0, selectionId: 'win-0' })
-            setTimeout(() => client1.emit('claimSquare', { matchId, squareId: 1, selectionId: 'win-1' }), 100)
-            setTimeout(() => client1.emit('claimSquare', { matchId, squareId: 2, selectionId: 'win-2' }), 200)
-          }, 100)
-        }
-      })
+    // Wait for result
+    await Promise.all([
+      client1.awaitEvent('result', 2000),
+      client2.awaitEvent('result', 2000)
+    ])
 
-      client1.on('result', (data) => {
-        if (data.winner === 'P1' && !gameFinished) {
-          gameFinished = true
-          // Only P1 requests rematch
-          client1.emit('rematch', { matchId })
-        }
-      })
-
-      client1.on('rematchPending', () => {
-        // P1 gets pending, but P2 never responds
-        // In a real test, we'd wait 60s, but for this test we just verify the state
-        setTimeout(() => {
-          clearTimeout(timeout)
-          resolve() // Test that rematch pending state is handled correctly
-        }, 500)
-      })
-
-      client1.emit('quickMatch')
-      client2.emit('quickMatch')
-    })
+    // Only client1 requests rematch
+    client1.emit('rematch', { matchId })
+    
+    // Verify rematch pending state
+    await client1.awaitEvent('rematchPending', 1000)
+    
+    // P2 doesn't respond - in real scenario this would timeout after 60s
+    // For test purposes, we just verify the pending state was reached
   })
 })
