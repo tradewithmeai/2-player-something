@@ -51,7 +51,10 @@
       "Bash(npx playwright test:*)",
       "Bash(powershell:*)",
       "Bash(VITE_MATCH_MODE=simul pnpm test -- apps/frontend/src)",
-      "Bash(set VITE_MATCH_MODE=simul)"
+      "Bash(set VITE_MATCH_MODE=simul)",
+      "Bash(git fetch:*)",
+      "Bash(then git add -A)",
+      "Bash(fi)"
     ],
     "deny": [],
     "ask": []
