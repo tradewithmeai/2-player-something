@@ -1,0 +1,1976 @@
+================================================================================
+BACKGAMMON ENGINE SPECIFICATION
+For 2-Player Online Game Framework
+================================================================================
+
+Project Overview:
+This document specifies how to implement a Backgammon game engine that plugs
+into an existing 2-player online game framework. The framework provides all
+networking, matchmaking, and UI scaffolding - you only need to implement the
+game logic.
+
+================================================================================
+SECTION 1: FRAMEWORK ARCHITECTURE OVERVIEW
+================================================================================
+
+1.1 HIGH-LEVEL ARCHITECTURE
+---------------------------
+The framework uses a pluggable GameEngine architecture with these layers:
+
+┌─────────────────────────────────────────────────────────────┐
+│ FRONTEND (React + Zustand)                                  │
+│ - Game board rendering                                      │
+│ - Player input handling                                     │
+│ - Real-time state updates via Socket.IO                    │
+└─────────────────────────────────────────────────────────────┘
+                            ↕ Socket.IO Events
+┌─────────────────────────────────────────────────────────────┐
+│ SERVER (Node.js + Fastify + Socket.IO)                     │
+│ ┌─────────────────────────────────────────────────────────┐ │
+│ │ MatchService (orchestration layer)                      │ │
+│ │ - Manages match lifecycle                               │ │
+│ │ - Handles player connections                            │ │
+│ │ - Validates & applies moves                             │ │
+│ │ - Broadcasts state updates                              │ │
+│ └─────────────────────────────────────────────────────────┘ │
+│                           ↕ Uses                             │
+│ ┌─────────────────────────────────────────────────────────┐ │
+│ │ GameEngine Interface (YOUR IMPLEMENTATION)              │ │
+│ │ - initState()                                           │ │
+│ │ - validateClaim()                                       │ │
+│ │ - applyClaim()                                          │ │
+│ │ - checkResult()                                         │ │
+│ └─────────────────────────────────────────────────────────┘ │
+└─────────────────────────────────────────────────────────────┘
+
+1.2 GAME MODES SUPPORTED
+------------------------
+The framework supports TWO distinct game modes:
+
+A) TURN-BASED MODE (Default)
+   - Players alternate turns
+   - Only the current player can make moves
+   - Server validates turn order
+   - Single move per turn
+
+B) SIMULTANEOUS MODE (Optional)
+   - Both players can move simultaneously
+   - Time-window based submission (default: 500ms windows)
+   - Conflict resolution when both claim same resource
+   - Priority given to "starter" player on ties
+
+For backgammon, you will likely use TURN-BASED mode, but the architecture
+supports both.
+
+1.3 KEY FRAMEWORK FEATURES
+--------------------------
+✓ Automatic matchmaking (quick match + room codes)
+✓ WebSocket-based real-time communication
+✓ Built-in rematch functionality
+✓ Version-controlled state synchronization
+✓ Race condition protection with mutex locks
+✓ Rate limiting (10 claims/10s, 8 accepted claims max)
+✓ Idempotent operations (duplicate detection via selectionId)
+✓ Comprehensive structured logging
+✓ Test infrastructure with 100+ existing tests
+
+================================================================================
+SECTION 2: GAMEENGINE INTERFACE SPECIFICATION
+================================================================================
+
+2.1 INTERFACE DEFINITION
+------------------------
+You must implement this TypeScript interface:
+
+```typescript
+export interface GameEngine {
+  // Initialize a new game state
+  initState(): EngineState
+
+  // Validate if a claim/move is legal
+  validateClaim(
+    state: EngineState,
+    seat: 'P1' | 'P2',
+    squareId: number
+  ): ValidationResult
+
+  // Apply a validated claim and return the mutation
+  applyClaim(
+    state: EngineState,
+    seat: 'P1' | 'P2',
+    squareId: number
+  ): ClaimApplication
+
+  // Check for win/draw/game-over condition
+  checkResult(state: EngineState): ResultCheck
+}
+```
+
+2.2 REQUIRED TYPE DEFINITIONS
+------------------------------
+
+EngineState:
+```typescript
+export interface EngineState {
+  board: (string | null)[]     // Game board representation
+  currentTurn: 'P1' | 'P2' | null  // Current player (null when finished)
+  winner: 'P1' | 'P2' | 'draw' | null  // Winner if game finished
+  winningLine: number[] | null  // Optional winning position markers
+  version: number               // Incrementing version for sync
+  finishedAt?: Date            // Timestamp when game ended
+}
+```
+
+ValidationResult:
+```typescript
+export interface ValidationResult {
+  valid: boolean
+  reason?: 'invalid_square' | 'square_occupied' |
+           'not_your_turn' | 'match_finished'
+}
+```
+
+ClaimApplication:
+```typescript
+export interface ClaimApplication {
+  board: (string | null)[]      // Updated board state
+  version: number                // Incremented version
+  nextTurn: 'P1' | 'P2' | null  // Who plays next (null if game over)
+}
+```
+
+ResultCheck:
+```typescript
+export interface ResultCheck {
+  status: 'active' | 'finished'
+  winner?: 'P1' | 'P2' | 'draw'
+  winningLine?: number[]  // Optional - for highlighting wins
+}
+```
+
+2.3 TIC-TAC-TOE REFERENCE IMPLEMENTATION
+-----------------------------------------
+The framework includes a complete TicTacToe engine at:
+  apps/server/src/engine/tictactoeEngine.ts
+
+Key implementation notes from TicTacToe:
+
+```typescript
+class TicTacToeEngine implements GameEngine {
+
+  initState(): EngineState {
+    return {
+      board: Array(9).fill(null),  // 3x3 grid = 9 squares
+      currentTurn: 'P1',            // P1 always starts
+      winner: null,
+      winningLine: null,
+      version: 0,
+      finishedAt: undefined
+    }
+  }
+
+  validateClaim(state, seat, squareId): ValidationResult {
+    // 1. Check if match already finished
+    if (state.winner !== null || state.finishedAt !== undefined) {
+      return { valid: false, reason: 'match_finished' }
+    }
+
+    // 2. Validate square ID bounds (0-8 for 3x3)
+    if (squareId < 0 || squareId > 8) {
+      return { valid: false, reason: 'invalid_square' }
+    }
+
+    // 3. Check if square already occupied
+    if (state.board[squareId] !== null) {
+      return { valid: false, reason: 'square_occupied' }
+    }
+
+    // 4. Check turn order (turn-based validation)
+    if (state.currentTurn !== seat) {
+      return { valid: false, reason: 'not_your_turn' }
+    }
+
+    return { valid: true }
+  }
+
+  applyClaim(state, seat, squareId): ClaimApplication {
+    const newBoard = [...state.board]
+    newBoard[squareId] = seat
+
+    return {
+      board: newBoard,
+      version: state.version + 1,
+      nextTurn: seat === 'P1' ? 'P2' : 'P1'
+    }
+  }
+
+  checkResult(state): ResultCheck {
+    // Check for wins (3-in-a-row patterns)
+    for (const seat of ['P1', 'P2']) {
+      const winResult = this.checkWin(state, seat)
+      if (winResult.isWin) {
+        return {
+          status: 'finished',
+          winner: seat,
+          winningLine: winResult.line
+        }
+      }
+    }
+
+    // Check for draw (all squares filled)
+    const filledSquares = state.board.filter(s => s !== null).length
+    if (filledSquares === 9) {
+      return { status: 'finished', winner: 'draw' }
+    }
+
+    return { status: 'active' }
+  }
+}
+```
+
+================================================================================
+SECTION 3: MATCHSERVICE INTEGRATION
+================================================================================
+
+3.1 HOW MATCHSERVICE USES YOUR ENGINE
+--------------------------------------
+The MatchService orchestrates matches using your engine like this:
+
+1. MATCH CREATION:
+   ```typescript
+   createMatch(roomId, players) {
+     const engineState = this.engine.initState()
+     // Creates match with initial board/state from engine
+   }
+   ```
+
+2. MOVE VALIDATION & APPLICATION:
+   ```typescript
+   async claimSquare(request) {
+     // 1. Validate using engine
+     const validation = this.engine.validateClaim(engineState, seat, squareId)
+     if (!validation.valid) {
+       return { success: false, reason: validation.reason }
+     }
+
+     // 2. Apply the move
+     const claimApp = this.engine.applyClaim(engineState, seat, squareId)
+     match.board = claimApp.board
+     match.version = claimApp.version
+     match.currentTurn = claimApp.nextTurn
+
+     // 3. Check for game end
+     const result = this.engine.checkResult(updatedState)
+     if (result.status === 'finished') {
+       match.status = 'finished'
+       match.winner = result.winner
+       match.finishedAt = new Date()
+     }
+
+     return { success: true, matchState: match }
+   }
+   ```
+
+3.2 ENGINE INITIALIZATION IN SERVER
+------------------------------------
+The server loads your engine via environment variable:
+
+```typescript
+// In apps/server/src/services/matchService.ts
+constructor() {
+  const engineKind = process.env.ENGINE_KIND || 'tictactoe'
+
+  if (engineKind === 'backgammon') {
+    this.engine = new BackgammonEngine()
+  } else if (engineKind === 'tictactoe') {
+    this.engine = new TicTacToeEngine()
+  }
+
+  console.log(JSON.stringify({
+    evt: 'engine.selected',
+    kind: engineKind
+  }))
+}
+```
+
+To use your engine:
+```bash
+ENGINE_KIND=backgammon MATCH_MODE=turn pnpm dev:server
+```
+
+3.3 CONCURRENCY & STATE MANAGEMENT
+-----------------------------------
+MatchService handles all concurrency concerns:
+
+✓ Mutex locks per match (using async-mutex library)
+✓ Version-controlled state updates
+✓ Idempotent move processing (duplicate detection)
+✓ Rate limiting per player
+✓ Atomic state transitions
+
+Your engine implementation should be PURE and STATELESS:
+- No internal state storage
+- All state passed as parameters
+- Return new state objects (immutable updates)
+- No async operations needed
+
+================================================================================
+SECTION 4: CLIENT-SERVER COMMUNICATION PROTOCOL
+================================================================================
+
+4.1 SOCKET.IO EVENTS OVERVIEW
+------------------------------
+All communication uses Socket.IO events over WebSocket:
+
+SERVER → CLIENT EVENTS:
+- 'matchStart'        → Match begins with initial state
+- 'squareClaimed'     → Move was applied (with version)
+- 'claimRejected'     → Move was rejected (with reason)
+- 'stateSync'         → Full state synchronization
+- 'result'            → Game ended (winner announcement)
+- 'windowOpen'        → Simul mode: new time window
+- 'windowClose'       → Simul mode: window resolved
+
+CLIENT → SERVER EVENTS:
+- 'claimSquare'       → Player attempts a move
+- 'rematch'           → Request a new game
+- 'quickMatch'        → Join matchmaking queue
+- 'createRoom'        → Create private room
+- 'joinRoom'          → Join via room code
+
+4.2 MOVE SUBMISSION FLOW
+-------------------------
+
+CLIENT:
+```typescript
+// Player clicks on game board
+claimSquare: (squareId: number) => {
+  const selectionId = `claim_${Date.now()}_${random()}`
+
+  socket.emit('claimSquare', {
+    matchId: matchState.id,
+    squareId: squareId,
+    selectionId: selectionId
+  })
+
+  // Store as pending (optimistic UI can use this)
+  pendingClaims.set(selectionId, { squareId, timestamp: Date.now() })
+}
+```
+
+SERVER PROCESSING:
+```typescript
+socket.on('claimSquare', async (data) => {
+  const { matchId, squareId, selectionId } = data
+
+  // 1. Idempotency check (duplicate detection)
+  if (processedSelections.has(selectionId)) {
+    return { success: false, reason: 'duplicate_selection' }
+  }
+
+  // 2. Mutex lock (prevent race conditions)
+  await mutex.runExclusive(async () => {
+    // 3. Rate limiting
+    if (!checkRateLimit(matchId, playerId)) {
+      return { success: false, reason: 'cap_reached' }
+    }
+
+    // 4. Engine validation
+    const validation = engine.validateClaim(state, seat, squareId)
+    if (!validation.valid) {
+      socket.emit('claimRejected', {
+        matchId, squareId, reason: validation.reason
+      })
+      return
+    }
+
+    // 5. Engine application
+    const claimApp = engine.applyClaim(state, seat, squareId)
+    match.board = claimApp.board
+    match.version = claimApp.version
+
+    // 6. Broadcast to room
+    gameNamespace.to(roomId).emit('squareClaimed', {
+      matchId,
+      squareId,
+      by: seat,
+      version: claimApp.version,
+      nextTurn: claimApp.nextTurn
+    })
+
+    // 7. Check game end
+    const result = engine.checkResult(updatedState)
+    if (result.status === 'finished') {
+      gameNamespace.to(roomId).emit('result', {
+        matchId,
+        winner: result.winner,
+        line: result.winningLine
+      })
+    }
+  })
+})
+```
+
+CLIENT RESPONSE HANDLERS:
+```typescript
+socket.on('squareClaimed', (data) => {
+  // Update local state with server-confirmed move
+  if (data.version > matchState.version) {
+    matchState.board[data.squareId] = data.by
+    matchState.version = data.version
+    matchState.currentTurn = data.nextTurn
+    pendingClaims.delete(correspondingSelectionId)
+  }
+})
+
+socket.on('claimRejected', (data) => {
+  // Remove optimistic update if used
+  pendingClaims.delete(data.selectionId)
+
+  // Show user feedback based on data.reason
+  if (data.reason === 'not_your_turn') {
+    showMessage("Wait for your turn!")
+  }
+})
+
+socket.on('result', (data) => {
+  matchState.status = 'finished'
+  matchState.winner = data.winner
+  matchState.winningLine = data.line
+  isFinished = true  // Lock UI
+
+  // Show winner/draw message
+})
+```
+
+4.3 STATE SYNCHRONIZATION
+--------------------------
+The framework uses version numbers to ensure consistency:
+
+- Every move increments the version number
+- Clients only apply updates with version > currentVersion
+- Server emits 'stateSync' periodically for redundancy
+- On reconnect, full state sync is sent
+
+Version Guard Pattern (Client):
+```typescript
+if (event.version <= matchState.version) {
+  console.log('Dropping stale event')
+  return  // Ignore older/duplicate updates
+}
+```
+
+================================================================================
+SECTION 5: BACKGAMMON-SPECIFIC REQUIREMENTS & CHALLENGES
+================================================================================
+
+5.1 CORE BACKGAMMON GAME MECHANICS
+-----------------------------------
+Backgammon is significantly more complex than tic-tac-toe. Key mechanics:
+
+1. DICE ROLLING
+   - Two dice rolled at start of each turn
+   - Doubles grant 4 moves instead of 2
+   - Dice determine which moves are legal
+
+2. BOARD STRUCTURE
+   - 24 points (triangular spaces)
+   - 15 checkers per player
+   - Movement direction opposite for each player
+   - Bar (for hit checkers)
+   - Off/Home (for borne-off checkers)
+
+3. MOVE RULES
+   - Checkers move according to dice values
+   - Can only land on empty, own, or single opponent checker
+   - Hit opponent checkers send them to bar
+   - Must enter from bar before other moves
+   - Must bear off all checkers to win
+
+4. TURN STRUCTURE
+   - Roll dice
+   - Make 1-4 moves (depending on dice)
+   - Must use all possible dice if available
+   - Can pass turn if no legal moves
+
+5.2 ADAPTING TO THE "SQUAREID" PATTERN
+---------------------------------------
+The current framework uses a simple "squareId" integer parameter for moves.
+This works for tic-tac-toe (9 squares, simple claims) but backgammon needs:
+
+- Source point (where checker is moving FROM)
+- Destination point (where checker is moving TO)
+- Dice value used for this move
+
+RECOMMENDED ENCODING STRATEGIES:
+
+OPTION A: Encode move as single integer
+```typescript
+// Encoding: (sourcePoint * 100) + destPoint
+// Example: Move from point 8 to point 5
+const squareId = (8 * 100) + 5  // = 805
+
+// In your engine:
+validateClaim(state, seat, squareId) {
+  const fromPoint = Math.floor(squareId / 100)  // 8
+  const toPoint = squareId % 100                 // 5
+
+  // Validate this move against dice rolls
+}
+```
+
+OPTION B: Use point ID as destination only
+```typescript
+// squareId represents destination point
+// Choose source automatically (closest checker)
+validateClaim(state, seat, destPoint) {
+  // Find which checker can legally move to destPoint
+  const validSources = findCheckersCanMoveTo(state, seat, destPoint)
+  // Apply move from best source
+}
+```
+
+OPTION C: Multi-step turn submission
+```typescript
+// Client submits moves one at a time
+// Track which dice values are still available
+// squareId encodes (from*100 + to) as in Option A
+// version increments after each sub-move
+// Turn completes when all dice exhausted or no moves available
+```
+
+RECOMMENDATION: Use Option A (encoded move) or Option C (multi-step turns).
+Option C is more compatible with the existing version-incrementing pattern.
+
+5.3 STATE REPRESENTATION FOR BACKGAMMON
+----------------------------------------
+You'll need to adapt the EngineState.board array:
+
+OPTION 1: Flat array with structured encoding
+```typescript
+board: [
+  // Indices 0-23: checker counts on each point
+  //   Positive = P1 checkers, Negative = P2 checkers
+  3, 0, 0, 0, 0, -5, 0, -3, 0, 0, 0, 5,
+  -5, 0, 0, 0, 3, 0, 5, 0, 0, 0, 0, -2,
+
+  // Indices 24-25: Bar counts
+  0,  // P1 checkers on bar
+  0,  // P2 checkers on bar
+
+  // Indices 26-27: Off/Home counts
+  0,  // P1 borne off
+  0,  // P2 borne off
+
+  // Indices 28-29: Current dice rolls
+  4,  // Die 1
+  6,  // Die 2
+
+  // Indices 30-31: Dice usage tracking
+  0b11, // Bitmask: which dice have been used
+  0,    // Moves made this turn
+]
+```
+
+OPTION 2: Extend EngineState with custom properties
+```typescript
+interface BackgammonEngineState extends EngineState {
+  board: number[]  // 24 points + bar + off
+  dice: [number, number]
+  diceUsed: boolean[]
+  movesThisTurn: number
+  mustEnterFromBar: boolean
+  // ... other game-specific state
+}
+```
+
+The framework doesn't strictly enforce the EngineState structure - you can
+add additional properties as needed, as long as you maintain the core fields.
+
+5.4 DICE ROLLING INTEGRATION
+-----------------------------
+The framework doesn't have built-in dice mechanics. Options:
+
+OPTION A: Roll dice in initState() for first turn, in applyClaim() for next turn
+```typescript
+applyClaim(state, seat, squareId): ClaimApplication {
+  const newState = applyMoveToBoard(state, squareId)
+
+  // Check if turn is complete (all dice used)
+  if (allDiceUsed(newState)) {
+    // Roll new dice for opponent's turn
+    const [die1, die2] = rollDice()
+    newState.dice = [die1, die2]
+    newState.diceUsed = [false, false]
+    newState.nextTurn = opponent(seat)
+  } else {
+    // Same player's turn continues
+    newState.nextTurn = seat
+  }
+
+  return {
+    board: newState.board,
+    version: state.version + 1,
+    nextTurn: newState.nextTurn
+  }
+}
+```
+
+OPTION B: Client-initiated dice rolls
+```typescript
+// Add a separate "rollDice" action
+// Client calls it at start of turn
+// Server validates it's time to roll
+// Server generates random dice and broadcasts
+```
+
+RECOMMENDATION: Option A (server-side dice) is more secure and simpler.
+Roll dice automatically when turn switches.
+
+5.5 COMPLEX VALIDATION REQUIREMENTS
+------------------------------------
+Backgammon validation is much more complex than tic-tac-toe:
+
+```typescript
+validateClaim(state, seat, squareId): ValidationResult {
+  // 1. Standard checks
+  if (state.winner !== null) {
+    return { valid: false, reason: 'match_finished' }
+  }
+
+  if (state.currentTurn !== seat) {
+    return { valid: false, reason: 'not_your_turn' }
+  }
+
+  // 2. Decode move
+  const fromPoint = Math.floor(squareId / 100)
+  const toPoint = squareId % 100
+
+  // 3. Check if player has checkers on bar (must enter first)
+  if (hasCheckersOnBar(state, seat)) {
+    if (fromPoint !== BAR) {
+      return {
+        valid: false,
+        reason: 'must_enter_from_bar'  // Custom reason
+      }
+    }
+  }
+
+  // 4. Check if move matches available dice
+  const moveDistance = calculateDistance(fromPoint, toPoint, seat)
+  const diceAvailable = getAvailableDice(state)
+
+  if (!diceAvailable.includes(moveDistance)) {
+    return {
+      valid: false,
+      reason: 'invalid_dice_value'  // Custom reason
+    }
+  }
+
+  // 5. Check landing point rules
+  const landingCheckers = state.board[toPoint]
+  const landingOwner = getOwner(landingCheckers)
+
+  if (landingOwner === opponent(seat) && Math.abs(landingCheckers) > 1) {
+    return {
+      valid: false,
+      reason: 'point_blocked'  // Custom reason
+    }
+  }
+
+  // 6. Additional complex rules...
+  // - Bearing off validation
+  // - Must use higher die first
+  // - No legal moves remaining
+
+  return { valid: true }
+}
+```
+
+CUSTOM REJECTION REASONS:
+The framework defines standard reasons but you can add custom ones:
+- 'must_enter_from_bar'
+- 'invalid_dice_value'
+- 'point_blocked'
+- 'must_use_higher_die'
+- 'cannot_bear_off_yet'
+
+These will be passed to the client in 'claimRejected' events.
+
+5.6 WIN CONDITION DETECTION
+----------------------------
+Backgammon win detection is simpler than validation:
+
+```typescript
+checkResult(state): ResultCheck {
+  // Check if P1 has borne off all 15 checkers
+  const p1BorneOff = state.board[P1_OFF_INDEX]
+  if (p1BorneOff === 15) {
+    return {
+      status: 'finished',
+      winner: 'P1',
+      winningLine: null  // No "winning line" in backgammon
+    }
+  }
+
+  // Check if P2 has borne off all 15 checkers
+  const p2BorneOff = state.board[P2_OFF_INDEX]
+  if (p2BorneOff === 15) {
+    return {
+      status: 'finished',
+      winner: 'P2',
+      winningLine: null
+    }
+  }
+
+  // Game still active
+  return { status: 'active' }
+}
+```
+
+Optional: You could use winningLine to highlight borne-off checkers.
+
+5.7 HANDLING "NO LEGAL MOVES" SCENARIO
+---------------------------------------
+In backgammon, a player may have no legal moves (dice too high, all blocked):
+
+```typescript
+validateClaim(state, seat, squareId): ValidationResult {
+  // If player submits a "pass turn" signal (e.g., squareId = -1)
+  if (squareId === -1) {
+    // Verify that truly no legal moves exist
+    const hasLegalMoves = findLegalMoves(state, seat).length > 0
+
+    if (hasLegalMoves) {
+      return { valid: false, reason: 'must_make_move' }
+    }
+
+    // Allow turn to pass
+    return { valid: true }
+  }
+
+  // ... rest of validation
+}
+
+applyClaim(state, seat, squareId): ClaimApplication {
+  // Handle pass turn
+  if (squareId === -1) {
+    // Roll dice for opponent
+    const [die1, die2] = rollDice()
+    return {
+      board: state.board,  // No board changes
+      version: state.version + 1,
+      nextTurn: opponent(seat),
+      dice: [die1, die2]
+    }
+  }
+
+  // ... rest of application
+}
+```
+
+================================================================================
+SECTION 6: FRONTEND ADAPTATION REQUIREMENTS
+================================================================================
+
+6.1 FRONTEND ARCHITECTURE OVERVIEW
+-----------------------------------
+The frontend is built with:
+- React (UI components)
+- Zustand (state management)
+- Socket.IO client (server communication)
+
+Key files:
+- apps/frontend/src/stores/socketStore.ts  → Game state & socket logic
+- apps/frontend/src/App.tsx                 → Main UI (needs modification)
+
+6.2 REQUIRED FRONTEND CHANGES
+------------------------------
+The existing frontend is hardcoded for tic-tac-toe (3x3 grid). For backgammon:
+
+1. BOARD RENDERING
+   Current: 9-square grid (index 0-8)
+   Needed: Backgammon board visualization
+
+   You need to create a BackgammonBoard.tsx component that:
+   - Renders 24 points (triangles)
+   - Shows checker counts/positions
+   - Displays bar and off areas
+   - Shows current dice rolls
+   - Highlights legal moves
+
+2. MOVE INPUT
+   Current: Click on empty square
+   Needed: Two-step move input
+
+   Options:
+   A) Click source point, then destination point
+   B) Drag checker from source to destination
+   C) Show legal moves on source click, click destination
+
+   RECOMMENDATION: Option C (click source → show legal moves → click dest)
+
+3. STATE MAPPING
+   Current: board[0-8] directly maps to UI squares
+   Needed: Parse board array into backgammon-specific structures
+
+   ```typescript
+   interface BackgammonBoardState {
+     points: number[]      // 24 point checker counts
+     bar: [number, number] // P1 bar, P2 bar
+     off: [number, number] // P1 off, P2 off
+     dice: [number, number]
+     legalMoves: Move[]
+   }
+
+   function parseEngineState(board: (string|null)[]): BackgammonBoardState {
+     // Extract structured data from flat array
+   }
+   ```
+
+4. DICE DISPLAY
+   Current: No dice visualization
+   Needed: Show current dice rolls and usage
+
+   ```tsx
+   <DiceDisplay
+     dice={[4, 6]}
+     used={[false, true]}  // Second die used
+   />
+   ```
+
+5. TURN INDICATOR
+   Current: "Your turn" / "Opponent's turn"
+   Needed: "Roll: [4][6] - Make 2 moves"
+
+   Track sub-moves within a turn (move 1/2, 1/4 for doubles).
+
+6.3 SOCKETSTORE ADAPTATIONS
+----------------------------
+The socketStore.ts needs minimal changes:
+
+```typescript
+claimSquare: (squareId: number) => {
+  // This method can stay the same!
+  // Just encode backgammon moves into squareId as discussed
+
+  socket.emit('claimSquare', {
+    matchId: matchState.id,
+    squareId: squareId,  // e.g., 805 for "point 8 → point 5"
+    selectionId: generateSelectionId()
+  })
+}
+```
+
+The event handlers (onSquareClaimed, onResult, etc.) don't need changes.
+The board state structure is what changes.
+
+6.4 UI/UX CONSIDERATIONS FOR BACKGAMMON
+----------------------------------------
+1. CHECKER VISUALIZATION
+   - Stack visualization for multiple checkers
+   - Color coding (traditionally: black/white or red/black)
+   - Smooth animations for moves
+
+2. LEGAL MOVE HIGHLIGHTING
+   - Highlight valid destination points when source selected
+   - Show dice-to-move correspondence
+   - Disable illegal moves (grey out)
+
+3. COMPLEX INTERACTIONS
+   - "Undo" last sub-move within turn (before submitting)
+   - "Submit turn" button when all required moves made
+   - Auto-submit if only one legal move sequence
+
+4. INFORMATION DISPLAY
+   - Pip count for each player (optional)
+   - Move history log (optional)
+   - Doubling cube (if implementing)
+
+6.5 RESPONSIVE DESIGN CHALLENGES
+---------------------------------
+Backgammon board is more complex than tic-tac-toe:
+- Portrait vs. landscape orientation
+- Mobile touch targets (checkers close together)
+- Tablet: best form factor for backgammon
+
+RECOMMENDATION:
+- Design for landscape/desktop first
+- Minimum viewport: 768px width
+- Use SVG for board rendering (scalable)
+
+================================================================================
+SECTION 7: TESTING STRATEGY
+================================================================================
+
+7.1 EXISTING TEST INFRASTRUCTURE
+---------------------------------
+The framework has comprehensive tests:
+
+- apps/server/src/tests/engine.tictactoe.spec.ts
+  → Engine smoke tests (100+ assertions)
+
+- apps/server/src/tests/matchIntegration.test.ts
+  → Integration tests (race conditions, version control)
+
+- e2e/turn.full-flow.spec.ts
+  → Playwright end-to-end tests
+
+7.2 REQUIRED TESTS FOR BACKGAMMON ENGINE
+-----------------------------------------
+
+1. ENGINE UNIT TESTS (apps/server/src/tests/engine.backgammon.spec.ts)
+
+```typescript
+describe('BackgammonEngine', () => {
+  describe('initState', () => {
+    it('should initialize with 15 checkers per player', () => {
+      const state = engine.initState()
+      const p1Checkers = countCheckers(state.board, 'P1')
+      const p2Checkers = countCheckers(state.board, 'P2')
+      expect(p1Checkers).toBe(15)
+      expect(p2Checkers).toBe(15)
+    })
+
+    it('should start with P1 turn', () => {
+      const state = engine.initState()
+      expect(state.currentTurn).toBe('P1')
+    })
+
+    it('should have initial dice rolls', () => {
+      const state = engine.initState()
+      expect(state.dice).toHaveLength(2)
+      expect(state.dice[0]).toBeGreaterThanOrEqual(1)
+      expect(state.dice[0]).toBeLessThanOrEqual(6)
+    })
+  })
+
+  describe('validateClaim', () => {
+    it('should reject move when not player turn', () => {
+      const state = createState({ currentTurn: 'P1' })
+      const result = engine.validateClaim(state, 'P2', 805)
+      expect(result.valid).toBe(false)
+      expect(result.reason).toBe('not_your_turn')
+    })
+
+    it('should reject move with invalid dice value', () => {
+      const state = createState({
+        currentTurn: 'P1',
+        dice: [2, 3],
+        board: [/* point 8 has P1 checker */]
+      })
+      // Try to move 5 spaces (neither 2 nor 3)
+      const result = engine.validateClaim(state, 'P1', 803)
+      expect(result.valid).toBe(false)
+      expect(result.reason).toBe('invalid_dice_value')
+    })
+
+    it('should reject move to blocked point', () => {
+      const state = createState({
+        currentTurn: 'P1',
+        dice: [3, 4],
+        board: [
+          /* point 8: P1 checker */
+          /* point 5: 2+ P2 checkers (blocked) */
+        ]
+      })
+      const result = engine.validateClaim(state, 'P1', 805)
+      expect(result.valid).toBe(false)
+      expect(result.reason).toBe('point_blocked')
+    })
+
+    it('should require entering from bar when checkers on bar', () => {
+      const state = createState({
+        currentTurn: 'P1',
+        dice: [4, 6],
+        bar: [1, 0]  // P1 has checker on bar
+      })
+      // Try to move regular checker
+      const result = engine.validateClaim(state, 'P1', 805)
+      expect(result.valid).toBe(false)
+      expect(result.reason).toBe('must_enter_from_bar')
+    })
+
+    it('should allow valid move', () => {
+      const state = createState({
+        currentTurn: 'P1',
+        dice: [4, 6],
+        board: [/* point 8 has P1 checker, point 4 is open */]
+      })
+      const result = engine.validateClaim(state, 'P1', 804)
+      expect(result.valid).toBe(true)
+    })
+  })
+
+  describe('applyClaim', () => {
+    it('should move checker from source to destination', () => {
+      const state = createState({
+        currentTurn: 'P1',
+        dice: [4, 6],
+        board: [/* point 8: 2 P1 checkers, point 4: empty */]
+      })
+      const result = engine.applyClaim(state, 'P1', 804)
+
+      expect(result.board[8]).toBe(1)  // One checker left on point 8
+      expect(result.board[4]).toBe(1)  // One checker moved to point 4
+      expect(result.version).toBe(state.version + 1)
+    })
+
+    it('should mark dice as used', () => {
+      const state = createState({
+        currentTurn: 'P1',
+        dice: [4, 6],
+        diceUsed: [false, false]
+      })
+      const result = engine.applyClaim(state, 'P1', 804)
+
+      expect(result.diceUsed).toContain(true)  // Die with value 4 marked used
+      expect(result.nextTurn).toBe('P1')       // Same player continues
+    })
+
+    it('should switch turn when all dice used', () => {
+      const state = createState({
+        currentTurn: 'P1',
+        dice: [4, 6],
+        diceUsed: [true, false]  // Only one die left
+      })
+      const result = engine.applyClaim(state, 'P1', 806)
+
+      expect(result.nextTurn).toBe('P2')  // Turn switches
+      expect(result.dice).toHaveLength(2)  // New dice rolled
+    })
+
+    it('should hit opponent checker', () => {
+      const state = createState({
+        currentTurn: 'P1',
+        dice: [3, 5],
+        board: [/* point 8: P1 checker, point 5: 1 P2 checker (blot) */]
+      })
+      const result = engine.applyClaim(state, 'P1', 805)
+
+      expect(result.board[5]).toBe(1)  // P1 checker on point
+      expect(result.bar[1]).toBe(1)    // P2 checker sent to bar
+    })
+  })
+
+  describe('checkResult', () => {
+    it('should detect P1 win when all borne off', () => {
+      const state = createState({
+        board: [/* all empty */],
+        off: [15, 0]  // P1 borne off all 15
+      })
+      const result = engine.checkResult(state)
+
+      expect(result.status).toBe('finished')
+      expect(result.winner).toBe('P1')
+    })
+
+    it('should return active when game ongoing', () => {
+      const state = createState({
+        board: [/* some checkers remaining */],
+        off: [10, 8]  // Neither player finished
+      })
+      const result = engine.checkResult(state)
+
+      expect(result.status).toBe('active')
+    })
+  })
+
+  describe('complex scenarios', () => {
+    it('should handle doubles correctly (4 moves)', () => {
+      const state = createState({
+        currentTurn: 'P1',
+        dice: [3, 3]  // Doubles
+      })
+
+      // Should allow 4 moves of 3 spaces
+      // Test all 4 moves...
+    })
+
+    it('should enforce using higher die first when only one move possible')
+    it('should handle bearing off rules correctly')
+    it('should detect when no legal moves available')
+  })
+})
+```
+
+2. INTEGRATION TESTS
+   - Adapt matchIntegration.test.ts for backgammon scenarios
+   - Test turn sequences (move → move → switch turn)
+   - Test race conditions with dice state
+
+3. END-TO-END TESTS
+   - Create e2e/backgammon.full-flow.spec.ts
+   - Test complete game flow from matchmaking to win
+   - Test UI interactions (click source, click dest)
+
+7.3 TESTING COMMANDS
+--------------------
+```bash
+# Run engine unit tests
+ENGINE_KIND=backgammon pnpm test -- engine.backgammon
+
+# Run integration tests
+ENGINE_KIND=backgammon MATCH_MODE=turn pnpm test:turn:be
+
+# Run E2E tests
+ENGINE_KIND=backgammon pnpm e2e:turn
+
+# Run all tests
+ENGINE_KIND=backgammon pnpm check
+```
+
+================================================================================
+SECTION 8: IMPLEMENTATION ROADMAP
+================================================================================
+
+8.1 PHASE 1: MINIMAL VIABLE ENGINE (Week 1-2)
+----------------------------------------------
+Goal: Get basic backgammon working with simplified rules
+
+Tasks:
+1. ✓ Create apps/server/src/engine/backgammonEngine.ts
+2. ✓ Implement initState() with standard starting position
+3. ✓ Implement validateClaim() with basic rules:
+   - Turn validation
+   - Dice value matching
+   - Point occupancy rules
+   - Skip: Bar, bearing off, advanced rules
+4. ✓ Implement applyClaim() with:
+   - Checker movement
+   - Dice usage tracking
+   - Turn switching
+5. ✓ Implement checkResult() (15 borne off = win)
+6. ✓ Write 20+ unit tests for above
+7. ✓ Update MatchService to load BackgammonEngine
+8. ✓ Test with existing server infrastructure
+
+Deliverable: Can play simplified backgammon via API/tests (no frontend yet)
+
+8.2 PHASE 2: COMPLETE GAME RULES (Week 3-4)
+--------------------------------------------
+Goal: Implement full backgammon rules
+
+Tasks:
+1. ✓ Add bar mechanics (entering from bar)
+2. ✓ Add hitting (sending opponent to bar)
+3. ✓ Add bearing off rules
+4. ✓ Add "must use higher die" rule
+5. ✓ Add "no legal moves" pass detection
+6. ✓ Handle doubles (4 moves)
+7. ✓ Write 50+ comprehensive unit tests
+8. ✓ Integration testing with server
+
+Deliverable: Complete backgammon engine passing all tests
+
+8.3 PHASE 3: FRONTEND BASIC (Week 5-6)
+---------------------------------------
+Goal: Playable backgammon UI
+
+Tasks:
+1. ✓ Design BackgammonBoard.tsx component
+2. ✓ Implement point rendering (24 triangles)
+3. ✓ Implement checker visualization
+4. ✓ Implement dice display
+5. ✓ Implement basic move input (click source, click dest)
+6. ✓ Parse board array into UI state
+7. ✓ Wire up claimSquare with move encoding
+8. ✓ Basic CSS styling (functional, not pretty)
+
+Deliverable: Can play backgammon in browser (basic graphics)
+
+8.4 PHASE 4: UX POLISH (Week 7-8)
+----------------------------------
+Goal: Production-quality user experience
+
+Tasks:
+1. ✓ Legal move highlighting
+2. ✓ Smooth animations for moves
+3. ✓ Improved checker stacking visualization
+4. ✓ Turn indicator with dice display
+5. ✓ Move history log
+6. ✓ Better error messages for invalid moves
+7. ✓ Responsive design (desktop + tablet)
+8. ✓ Accessibility (keyboard navigation)
+
+Deliverable: Polished, professional backgammon game
+
+8.5 PHASE 5: ADVANCED FEATURES (Optional)
+------------------------------------------
+Goal: Complete backgammon experience
+
+Tasks:
+1. ✓ Doubling cube implementation
+2. ✓ Match scoring (gammon, backgammon)
+3. ✓ Pip count display
+4. ✓ AI opponent (for practice mode)
+5. ✓ Tournament mode (best of N games)
+6. ✓ Elo ratings
+7. ✓ Move suggestion system (for learning)
+
+Deliverable: Feature-complete backgammon platform
+
+================================================================================
+SECTION 9: FILE STRUCTURE & BOILERPLATE
+================================================================================
+
+9.1 REQUIRED NEW FILES
+----------------------
+
+apps/server/src/engine/backgammonEngine.ts
+```typescript
+import {
+  GameEngine,
+  EngineState,
+  ValidationResult,
+  ClaimApplication,
+  ResultCheck
+} from './types.js'
+
+// Backgammon-specific constants
+const POINTS = 24
+const CHECKERS_PER_PLAYER = 15
+const BAR_P1 = 24
+const BAR_P2 = 25
+const OFF_P1 = 26
+const OFF_P2 = 27
+const DICE_1 = 28
+const DICE_2 = 29
+
+// Starting position for standard backgammon
+const STARTING_POSITION = [
+  2, 0, 0, 0, 0, -5,  // Points 0-5
+  0, -3, 0, 0, 0, 5,  // Points 6-11
+  -5, 0, 0, 0, 3, 0,  // Points 12-17
+  5, 0, 0, 0, 0, -2,  // Points 18-23
+  0, 0,               // Bar (P1, P2)
+  0, 0,               // Off (P1, P2)
+  0, 0,               // Dice (will be rolled)
+  0, 0                // Dice used flags, moves count
+]
+
+export class BackgammonEngine implements GameEngine {
+
+  initState(): EngineState {
+    const dice = this.rollDice()
+    const board = [...STARTING_POSITION]
+    board[DICE_1] = dice[0]
+    board[DICE_2] = dice[1]
+
+    return {
+      board,
+      currentTurn: 'P1',
+      winner: null,
+      winningLine: null,
+      version: 0,
+      finishedAt: undefined
+    }
+  }
+
+  validateClaim(
+    state: EngineState,
+    seat: 'P1' | 'P2',
+    squareId: number
+  ): ValidationResult {
+    // Standard checks
+    if (state.winner !== null || state.finishedAt !== undefined) {
+      return { valid: false, reason: 'match_finished' }
+    }
+
+    if (state.currentTurn !== seat) {
+      return { valid: false, reason: 'not_your_turn' }
+    }
+
+    // Decode move (fromPoint * 100 + toPoint)
+    const fromPoint = Math.floor(squareId / 100)
+    const toPoint = squareId % 100
+
+    // TODO: Implement backgammon-specific validation
+    // - Check bar requirement
+    // - Check dice matching
+    // - Check point blocking
+    // - Check bearing off rules
+
+    return { valid: true }
+  }
+
+  applyClaim(
+    state: EngineState,
+    seat: 'P1' | 'P2',
+    squareId: number
+  ): ClaimApplication {
+    const newBoard = [...state.board]
+
+    // Decode move
+    const fromPoint = Math.floor(squareId / 100)
+    const toPoint = squareId % 100
+
+    // TODO: Apply move to board
+    // - Move checker
+    // - Handle hitting
+    // - Mark die as used
+    // - Check if turn complete
+
+    const nextTurn = this.determineTurn(newBoard, seat)
+
+    return {
+      board: newBoard,
+      version: state.version + 1,
+      nextTurn
+    }
+  }
+
+  checkResult(state: EngineState): ResultCheck {
+    const p1Off = state.board[OFF_P1]
+    const p2Off = state.board[OFF_P2]
+
+    if (p1Off === CHECKERS_PER_PLAYER) {
+      return { status: 'finished', winner: 'P1' }
+    }
+
+    if (p2Off === CHECKERS_PER_PLAYER) {
+      return { status: 'finished', winner: 'P2' }
+    }
+
+    return { status: 'active' }
+  }
+
+  // Helper methods
+  private rollDice(): [number, number] {
+    return [
+      Math.floor(Math.random() * 6) + 1,
+      Math.floor(Math.random() * 6) + 1
+    ]
+  }
+
+  private determineTurn(
+    board: (string | null)[],
+    currentSeat: 'P1' | 'P2'
+  ): 'P1' | 'P2' | null {
+    // TODO: Check if all dice used
+    // If yes, switch turn and roll new dice
+    // If no, return current seat
+    return currentSeat === 'P1' ? 'P2' : 'P1'
+  }
+}
+```
+
+apps/server/src/tests/engine.backgammon.spec.ts
+```typescript
+import { describe, it, expect, beforeEach } from 'vitest'
+import { BackgammonEngine } from '../engine/backgammonEngine.js'
+import { EngineState } from '../engine/types.js'
+
+describe('BackgammonEngine', () => {
+  let engine: BackgammonEngine
+
+  beforeEach(() => {
+    engine = new BackgammonEngine()
+  })
+
+  describe('initState', () => {
+    it('should initialize with standard starting position', () => {
+      const state = engine.initState()
+      expect(state.board).toHaveLength(32)  // Adjust based on encoding
+      expect(state.currentTurn).toBe('P1')
+      expect(state.version).toBe(0)
+    })
+  })
+
+  // Add more tests following Section 7 guidelines
+})
+```
+
+apps/frontend/src/components/BackgammonBoard.tsx
+```tsx
+import React from 'react'
+import { useSocketStore } from '../stores/socketStore'
+
+interface BackgammonBoardProps {
+  // Props as needed
+}
+
+export const BackgammonBoard: React.FC<BackgammonBoardProps> = () => {
+  const matchState = useSocketStore(state => state.matchState)
+  const claimSquare = useSocketStore(state => state.claimSquare)
+  const mySeat = useSocketStore(state => state.mySeat)
+
+  if (!matchState) {
+    return <div>Loading game...</div>
+  }
+
+  // Parse board state
+  const parsedBoard = parseBackgammonBoard(matchState.board)
+
+  // TODO: Implement backgammon board rendering
+
+  return (
+    <div className="backgammon-board">
+      {/* Render points, checkers, dice, etc. */}
+    </div>
+  )
+}
+
+function parseBackgammonBoard(board: (string | null)[]) {
+  // Convert flat array to structured backgammon state
+  return {
+    points: board.slice(0, 24),
+    bar: [board[24], board[25]],
+    off: [board[26], board[27]],
+    dice: [board[28], board[29]]
+  }
+}
+```
+
+9.2 MODIFIED FILES
+------------------
+
+apps/server/src/services/matchService.ts (lines 112-126)
+```typescript
+constructor() {
+  const engineKind = process.env.ENGINE_KIND || 'tictactoe'
+
+  if (engineKind === 'backgammon') {
+    this.engine = new BackgammonEngine()
+  } else if (engineKind === 'tictactoe') {
+    this.engine = new TicTacToeEngine()
+  } else {
+    // Default fallback
+    this.engine = new TicTacToeEngine()
+  }
+
+  console.log(JSON.stringify({
+    evt: 'engine.selected',
+    kind: engineKind
+  }))
+}
+```
+
+apps/frontend/src/App.tsx
+```tsx
+import { BackgammonBoard } from './components/BackgammonBoard'
+
+// ... in render:
+{matchState && engineKind === 'backgammon' && (
+  <BackgammonBoard />
+)}
+
+{matchState && engineKind === 'tictactoe' && (
+  <TicTacToeBoard />  // Existing component
+)}
+```
+
+9.3 ENVIRONMENT VARIABLES
+--------------------------
+
+.env (server)
+```bash
+ENGINE_KIND=backgammon
+MATCH_MODE=turn
+SIMUL_WINDOW_MS=500
+```
+
+.env (frontend)
+```bash
+VITE_ENGINE_KIND=backgammon
+VITE_MATCH_MODE=turn
+```
+
+================================================================================
+SECTION 10: COMMON PITFALLS & DEBUGGING
+================================================================================
+
+10.1 COMMON MISTAKES
+--------------------
+
+1. MUTATION OF STATE
+   ❌ WRONG:
+   ```typescript
+   applyClaim(state, seat, squareId) {
+     state.board[5] = 'P1'  // Mutating input!
+     return { board: state.board, ... }
+   }
+   ```
+
+   ✅ CORRECT:
+   ```typescript
+   applyClaim(state, seat, squareId) {
+     const newBoard = [...state.board]  // Copy
+     newBoard[5] = 'P1'
+     return { board: newBoard, ... }
+   }
+   ```
+
+2. FORGETTING TO INCREMENT VERSION
+   ❌ WRONG:
+   ```typescript
+   applyClaim(state, seat, squareId) {
+     return {
+       board: newBoard,
+       version: state.version,  // Not incremented!
+       nextTurn: 'P2'
+     }
+   }
+   ```
+
+   ✅ CORRECT:
+   ```typescript
+   return {
+     board: newBoard,
+     version: state.version + 1,  // Always increment
+     nextTurn: 'P2'
+   }
+   ```
+
+3. ASYNC OPERATIONS IN ENGINE
+   ❌ WRONG:
+   ```typescript
+   async applyClaim(state, seat, squareId) {
+     await database.save(state)  // Don't do async!
+     return { ... }
+   }
+   ```
+
+   ✅ CORRECT:
+   ```typescript
+   applyClaim(state, seat, squareId) {
+     // Pure synchronous logic only
+     return { ... }
+   }
+   ```
+
+   The MatchService handles all async/persistence concerns.
+
+4. RETURNING NULL FOR NEXTTURN WHEN GAME ACTIVE
+   ❌ WRONG:
+   ```typescript
+   applyClaim(state, seat, squareId) {
+     return {
+       board: newBoard,
+       version: state.version + 1,
+       nextTurn: null  // Wrong! Game still active
+     }
+   }
+   ```
+
+   ✅ CORRECT:
+   ```typescript
+   return {
+     board: newBoard,
+     version: state.version + 1,
+     nextTurn: seat === 'P1' ? 'P2' : 'P1'  // Who plays next
+   }
+   ```
+
+   Only set nextTurn=null when game is finished.
+
+5. NOT VALIDATING IN validateClaim()
+   ❌ WRONG:
+   ```typescript
+   validateClaim(state, seat, squareId) {
+     // Apply logic here
+     const newBoard = applyMove(state.board, squareId)
+     return { valid: true }
+   }
+   ```
+
+   ✅ CORRECT:
+   ```typescript
+   validateClaim(state, seat, squareId) {
+     // ONLY validation logic, no state changes
+     if (isInvalidMove(state, seat, squareId)) {
+       return { valid: false, reason: 'invalid_square' }
+     }
+     return { valid: true }
+   }
+   ```
+
+   Keep validateClaim() and applyClaim() separate.
+
+10.2 DEBUGGING TECHNIQUES
+--------------------------
+
+1. STRUCTURED LOGGING
+   Add console.log with JSON format:
+   ```typescript
+   console.log(JSON.stringify({
+     evt: 'backgammon.validate',
+     seat: seat,
+     from: fromPoint,
+     to: toPoint,
+     dice: state.board.slice(DICE_1, DICE_2+1),
+     valid: result.valid,
+     reason: result.reason
+   }))
+   ```
+
+2. UNIT TEST DRIVEN DEBUGGING
+   Write failing test first:
+   ```typescript
+   it('should allow entering from bar with matching die', () => {
+     const state = createTestState({
+       bar: [1, 0],  // P1 has checker on bar
+       dice: [3, 5]
+     })
+
+     const result = engine.validateClaim(state, 'P1', -100 + 3)
+     expect(result.valid).toBe(true)  // Fails? Debug why.
+   })
+   ```
+
+3. SERVER DEBUG ENDPOINTS
+   Use existing debug endpoints:
+   ```bash
+   curl http://localhost:8890/debug/match?matchId=match_xxx
+   ```
+
+   Returns full match state including board array.
+
+4. FRONTEND CONSOLE LOGGING
+   socketStore.ts already logs all events:
+   ```
+   [Socket→Server] claimSquare: [{ matchId, squareId: 805, ... }]
+   [SquareClaimed] Received: { matchId, squareId, by, version }
+   ```
+
+   Check browser console for event flow.
+
+5. VERSION MISMATCH DEBUGGING
+   If moves not applying:
+   - Check server logs for version increments
+   - Check client logs for version drops
+   - Look for "DROPPED: stale version" messages
+
+   Problem: Client and server version out of sync
+   Solution: Ensure applyClaim() always increments version
+
+10.3 PERFORMANCE CONSIDERATIONS
+--------------------------------
+
+1. BOARD COPYING
+   ```typescript
+   // For 32-element array, spread is fine:
+   const newBoard = [...state.board]
+
+   // For very large arrays, consider:
+   const newBoard = state.board.slice()
+   ```
+
+2. LEGAL MOVE CALCULATION
+   If calculating all legal moves is expensive:
+   ```typescript
+   // Cache legal moves in state
+   interface EngineState {
+     board: (string | null)[]
+     legalMoves: number[]  // Pre-calculated
+     // ...
+   }
+
+   // Recalculate only when dice roll or after move
+   ```
+
+3. FRONTEND RENDERING
+   Backgammon board has many elements. Use:
+   - React.memo() for checker components
+   - useMemo() for parsed board state
+   - Avoid re-rendering unchanged points
+
+================================================================================
+SECTION 11: DEPLOYMENT & CONFIGURATION
+================================================================================
+
+11.1 RUNNING THE BACKGAMMON ENGINE
+-----------------------------------
+
+Development (Local):
+```bash
+# Server
+cd apps/server
+ENGINE_KIND=backgammon MATCH_MODE=turn pnpm dev
+
+# Frontend
+cd apps/frontend
+VITE_ENGINE_KIND=backgammon pnpm dev
+
+# Or from root with both:
+ENGINE_KIND=backgammon VITE_ENGINE_KIND=backgammon pnpm dev
+```
+
+Production Build:
+```bash
+# Build server
+ENGINE_KIND=backgammon pnpm build:server
+
+# Build frontend
+VITE_ENGINE_KIND=backgammon pnpm build:frontend
+
+# Start server
+ENGINE_KIND=backgammon pnpm start:server
+```
+
+11.2 ENVIRONMENT VARIABLES REFERENCE
+-------------------------------------
+
+SERVER (.env or process.env):
+- ENGINE_KIND=backgammon           → Load BackgammonEngine
+- MATCH_MODE=turn                  → Turn-based (or 'simul')
+- SIMUL_WINDOW_MS=500              → Simul window duration (if using simul)
+- SIMUL_STARTER_ALTERNATION=true   → Alternate starters (simul only)
+- PORT=8890                        → Server port
+- NODE_ENV=production              → Production mode
+
+FRONTEND (.env or .env.local):
+- VITE_ENGINE_KIND=backgammon      → Frontend knows which UI to render
+- VITE_MATCH_MODE=turn             → Match server's mode
+- VITE_WS_URL=http://localhost:8890 → WebSocket server URL
+
+11.3 DOCKER DEPLOYMENT (Optional)
+----------------------------------
+
+Dockerfile (server):
+```dockerfile
+FROM node:18-alpine
+WORKDIR /app
+COPY package.json pnpm-lock.yaml ./
+RUN npm install -g pnpm && pnpm install
+COPY . .
+RUN pnpm build:server
+
+ENV ENGINE_KIND=backgammon
+ENV MATCH_MODE=turn
+ENV PORT=9001
+
+CMD ["pnpm", "start:server"]
+```
+
+docker-compose.yml:
+```yaml
+version: '3.8'
+services:
+  server:
+    build: .
+    ports:
+      - "9001:9001"
+    environment:
+      - ENGINE_KIND=backgammon
+      - MATCH_MODE=turn
+      - NODE_ENV=production
+
+  frontend:
+    build: ./apps/frontend
+    ports:
+      - "3000:80"
+    environment:
+      - VITE_ENGINE_KIND=backgammon
+      - VITE_WS_URL=http://localhost:9001
+```
+
+================================================================================
+SECTION 12: ADDITIONAL RESOURCES & REFERENCES
+================================================================================
+
+12.1 BACKGAMMON RULES REFERENCES
+---------------------------------
+- Official USBGF Rules: https://www.usbgf.org/rules-of-backgammon/
+- Move Validation Logic: https://bkgm.com/rules.html
+- Bearing Off Rules: https://www.bkgm.com/faq/BearingOff.html
+
+12.2 EXISTING CODEBASE REFERENCES
+----------------------------------
+Key files to study:
+1. apps/server/src/engine/types.ts (lines 1-46)
+   → Interface definitions
+
+2. apps/server/src/engine/tictactoeEngine.ts (lines 1-106)
+   → Complete working example
+
+3. apps/server/src/services/matchService.ts (lines 230-329, 331-409)
+   → How engine is called (claimSquare flow)
+
+4. apps/server/src/index.ts (lines 520-753)
+   → Socket event handling
+
+5. apps/frontend/src/stores/socketStore.ts (lines 893-953)
+   → Client-side move submission
+
+12.3 ARCHITECTURAL PATTERNS USED
+---------------------------------
+1. Dependency Injection
+   - MatchService receives GameEngine via constructor
+   - Allows swapping engines without changing orchestration
+
+2. Command Pattern
+   - claimSquare request encapsulates move data
+   - Idempotent via selectionId
+
+3. State Machine
+   - Match status: waiting → active → finished
+   - Turn progression: P1 → P2 → P1 → ...
+
+4. Event-Driven Architecture
+   - Socket.IO events for all state changes
+   - Pub/sub pattern for multiplayer sync
+
+5. Optimistic UI Updates (optional)
+   - Client can show pending moves immediately
+   - Rollback on rejection
+
+12.4 SIMILAR GAME IMPLEMENTATIONS (Future)
+------------------------------------------
+This architecture can support many turn-based games:
+
+SIMPLE (like TicTacToe complexity):
+- Connect 4
+- Checkers (Draughts)
+- Othello/Reversi
+- Battleship
+
+MODERATE (like Backgammon complexity):
+- Chess
+- Go (simplified rules)
+- Mancala
+
+COMPLEX (would require significant extensions):
+- Poker (hidden information, betting)
+- Bridge (teams, bidding)
+- Settlers of Catan (resources, trading)
+
+The GameEngine interface is best suited for:
+✓ Perfect information games
+✓ Two-player games
+✓ Turn-based (or windowed simultaneous)
+✓ Deterministic outcomes
+
+Not ideal for:
+✗ Hidden information (cards in hand)
+✗ Real-time action games
+✗ 3+ player games (would need architecture changes)
+
+================================================================================
+SECTION 13: SUCCESS CRITERIA & DELIVERABLES
+================================================================================
+
+13.1 DEFINITION OF DONE
+------------------------
+
+For MVP (Minimal Viable Product):
+✅ BackgammonEngine class implemented with all 4 required methods
+✅ Standard backgammon starting position
+✅ Basic move validation (turn, dice, blocking)
+✅ Basic move application (checker movement, turn switching)
+✅ Win detection (15 checkers borne off)
+✅ 50+ passing unit tests
+✅ Integration with MatchService (ENGINE_KIND=backgammon works)
+✅ Playable via API/tests (no frontend required for MVP)
+
+For Production Release:
+✅ All backgammon rules implemented:
+   - Bar mechanics (entering, hitting)
+   - Bearing off with all rules
+   - Doubles (4 moves)
+   - "Must use higher die" rule
+   - Pass turn when no legal moves
+✅ 100+ comprehensive unit tests
+✅ Integration tests passing
+✅ Functional frontend UI (basic graphics OK)
+✅ Can play complete games end-to-end
+✅ Rematch functionality works
+✅ No critical bugs
+
+For Polished Release:
+✅ Professional UI/UX design
+✅ Smooth animations
+✅ Legal move highlighting
+✅ Mobile/tablet responsive
+✅ Accessibility compliance
+✅ Comprehensive error messages
+✅ Move history log
+✅ E2E tests passing (Playwright)
+
+13.2 TESTING CHECKLIST
+----------------------
+Run these commands to verify success:
+
+```bash
+# 1. Engine unit tests
+ENGINE_KIND=backgammon pnpm test -- engine.backgammon
+# Expected: All tests pass (0 failures)
+
+# 2. Integration tests
+ENGINE_KIND=backgammon MATCH_MODE=turn pnpm test:turn:be
+# Expected: Match tests pass with backgammon engine
+
+# 3. Build verification
+ENGINE_KIND=backgammon pnpm build
+# Expected: No TypeScript errors
+
+# 4. Server startup
+ENGINE_KIND=backgammon pnpm dev:server
+# Expected: Server starts, logs "engine.selected": "backgammon"
+
+# 5. Full application
+ENGINE_KIND=backgammon pnpm dev
+# Expected: Can connect, matchmake, play game in browser
+
+# 6. E2E tests (when frontend complete)
+ENGINE_KIND=backgammon pnpm e2e:turn
+# Expected: Playwright tests pass
+```
+
+13.3 DELIVERABLES CHECKLIST
+----------------------------
+
+Code Files:
+□ apps/server/src/engine/backgammonEngine.ts
+□ apps/server/src/tests/engine.backgammon.spec.ts
+□ apps/frontend/src/components/BackgammonBoard.tsx
+□ apps/frontend/src/components/BackgammonChecker.tsx
+□ apps/frontend/src/components/BackgammonDice.tsx
+
+Configuration:
+□ Updated apps/server/src/services/matchService.ts (engine selection)
+□ Updated apps/frontend/src/App.tsx (conditional rendering)
+□ .env files with ENGINE_KIND=backgammon
+
+Documentation:
+□ README.md section for backgammon
+□ API documentation for move encoding
+□ User guide (how to play)
+
+Tests:
+□ Unit tests (50+ for MVP, 100+ for production)
+□ Integration tests (adapted from existing)
+□ E2E tests (backgammon.full-flow.spec.ts)
+
+Optional (Nice-to-Have):
+□ Move validation visual feedback
+□ AI opponent for practice
+□ Pip count calculator
+□ Match statistics/history
+
+================================================================================
+END OF SPECIFICATION
+================================================================================
+
+This document provides a complete blueprint for implementing a Backgammon game
+engine that integrates with the existing 2-player online game framework.
+
+Key Takeaways:
+1. Implement the 4-method GameEngine interface
+2. Use the TicTacToe engine as a reference
+3. Encode backgammon moves into the squareId parameter
+4. Keep engine logic pure and stateless
+5. MatchService handles all concurrency/networking
+6. Frontend requires custom board component
+7. Test extensively using provided infrastructure
+
+The framework is production-ready and battle-tested. Your implementation only
+needs to focus on backgammon game logic, not networking, matchmaking, or
+infrastructure concerns.
+
+For questions or clarifications, refer to existing code in:
+- apps/server/src/engine/tictactoeEngine.ts (complete reference implementation)
+- apps/server/src/services/matchService.ts (how engines are used)
+- apps/server/src/tests/engine.tictactoe.spec.ts (test patterns)
+
+Good luck with your implementation!

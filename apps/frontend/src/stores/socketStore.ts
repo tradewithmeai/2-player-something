@@ -42,6 +42,7 @@ export interface MatchState {
   winningLine: number[] | null
   startedAt: Date
   finishedAt?: Date
+  gameType?: 'tictactoe' | 'gameofstrife' | 'backgammon' // Game type from server
 }
 
 export interface Move {
@@ -115,7 +116,7 @@ interface SocketState {
   acceptRematch: () => void
 }
 
-const SERVER_URL = import.meta.env.VITE_WS_URL || 'http://localhost:8002'
+const SERVER_URL = import.meta.env.VITE_WS_URL || 'http://localhost:8890'
 const NAMESPACE = '/game'
 
 // Store helper functions

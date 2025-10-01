@@ -1,15 +1,25 @@
 import { useSocketStore, getMySeat, getSymbol } from '../stores/socketStore'
+import { GameProps } from './GameRegistry'
 
-interface TicTacToeBoardProps {
+interface TicTacToeBoardProps extends Partial<GameProps> {
   className?: string
 }
 
-export function TicTacToeBoard({ className = '' }: TicTacToeBoardProps) {
+export function TicTacToeBoard({
+  className = '',
+  matchState: propMatchState,
+  mySeat: propMySeat,
+  isMyTurn: propIsMyTurn,
+  onAction: propOnAction,
+  onRematch: propOnRematch
+}: TicTacToeBoardProps) {
+  // Use props if provided, otherwise fall back to store
+  const store = useSocketStore()
   const {
-    matchState,
+    matchState: storeMatchState,
     pendingClaims,
     pendingSimulClaims,
-    mySeat,
+    mySeat: storeMySeat,
     rematchPending,
     rematchRequesterSeat,
     isFinished,
@@ -17,10 +27,16 @@ export function TicTacToeBoard({ className = '' }: TicTacToeBoardProps) {
     matchMode,
     currentWindowId,
     windowDeadline,
-    claimSquare,
-    requestRematch,
+    claimSquare: storeClaimSquare,
+    requestRematch: storeRequestRematch,
     acceptRematch
-  } = useSocketStore()
+  } = store
+
+  // Use props if provided, otherwise use store values
+  const matchState = propMatchState || storeMatchState
+  const mySeat = propMySeat || storeMySeat
+  const claimSquare = propOnAction || storeClaimSquare
+  const requestRematch = propOnRematch || storeRequestRematch
 
   if (!matchState) {
     return (
@@ -30,7 +46,7 @@ export function TicTacToeBoard({ className = '' }: TicTacToeBoardProps) {
     )
   }
 
-  const isMyTurn = matchState.currentTurn === mySeat
+  const isMyTurn = propIsMyTurn !== undefined ? propIsMyTurn : (matchState.currentTurn === mySeat)
   const isGameFinished = isFinished
 
   const getSquareState = (squareIndex: number) => {

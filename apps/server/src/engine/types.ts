@@ -17,6 +17,7 @@ export interface ClaimApplication {
   board: (string | null)[]
   version: number
   nextTurn: 'P1' | 'P2' | null
+  engineState?: any // Optional engine-specific state for complex games
 }
 
 export interface WinCheckResult {

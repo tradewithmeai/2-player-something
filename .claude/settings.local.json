@@ -54,7 +54,14 @@
       "Bash(set VITE_MATCH_MODE=simul)",
       "Bash(git fetch:*)",
       "Bash(then git add -A)",
-      "Bash(fi)"
+      "Bash(fi)",
+      "Bash(echo \"Creating tag: $TAG\")",
+      "Bash(echo \"Tag created: $TAG\")",
+      "Bash(echo:*)",
+      "Read(//d/Documents/11Projects/Game-of-Strife-Standalone/**)",
+      "Bash(ENGINE_KIND=gameofstrife pnpm --filter server test)",
+      "Bash(netstat:*)",
+      "Bash(findstr:*)"
     ],
     "deny": [],
     "ask": []

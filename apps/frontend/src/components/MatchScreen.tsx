@@ -1,6 +1,6 @@
 import React from 'react'
 import { useSocketStore, Match, getMySeat, getOppSeat, getSymbol, getPlayerShortId } from '../stores/socketStore'
-import { TicTacToeBoard } from './TicTacToeBoard'
+import { DynamicGameComponent } from './DynamicGameComponent'
 
 interface MatchScreenProps {
   match: Match
@@ -98,9 +98,9 @@ export const MatchScreen: React.FC<MatchScreenProps> = ({ match }) => {
           </div>
         </div>
 
-        {/* Tic-Tac-Toe Game Board */}
+        {/* Dynamic Game Component */}
         <div className="bg-gray-800 rounded-lg p-8 text-center">
-          <TicTacToeBoard />
+          <DynamicGameComponent showDebugInfo={import.meta.env.DEV} />
         </div>
 
         {/* Match Actions */}

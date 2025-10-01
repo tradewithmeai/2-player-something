@@ -9,6 +9,13 @@ import { MatchService } from './services/matchService.js'
 import { GameRegistry } from './services/gameRegistry.js'
 import { ClientToServerEvents, ServerToClientEvents, Room } from './types/room.js'
 
+// Debug environment variables
+console.log('DEBUG: All relevant env vars:')
+console.log('NODE_ENV:', process.env.NODE_ENV)
+console.log('ENGINE_KIND:', process.env.ENGINE_KIND)
+console.log('MATCH_MODE:', process.env.MATCH_MODE)
+console.log('PORT:', process.env.PORT)
+
 // Single namespace constant
 export const NAMESPACE = '/game'
 

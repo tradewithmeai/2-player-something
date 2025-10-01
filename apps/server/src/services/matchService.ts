@@ -3,13 +3,14 @@ import { v4 as uuidv4 } from 'uuid'
 import { GameRegistry } from './gameRegistry.js'
 import { GameEngine } from '../engine/types.js'
 import { TicTacToeEngine } from '../engine/tictactoeEngine.js'
+import { GameOfStrifeEngine } from '../engine/gameOfStrifeEngine.js'
 
 // Note: Winning line logic now handled by GameEngine
 
 export interface MatchState {
   id: string
   roomId: string
-  board: (string | null)[] // 9 squares, null = empty, seat (P1/P2) = claimed
+  board: (string | null)[] // Flattened board representation for compatibility
   players: string[] // [player1Id, player2Id]
   playerSeats: Map<string, 'P1' | 'P2'> // playerId -> seat mapping
   currentTurn: 'P1' | 'P2' | null // seat of current turn (not playerId), null when finished
@@ -25,6 +26,11 @@ export interface MatchState {
   currentWindowId?: number
   currentWindowStarter?: 'P1' | 'P2'
   windowTimeout?: NodeJS.Timeout
+  // Engine-specific state storage
+  engineState?: any // Store the full engine state separately
+  gameType: 'tictactoe' | 'gameofstrife' | 'backgammon' // Game type identifier
+  // Game-specific metadata for frontend consumption
+  metadata?: any
 }
 
 export interface Move {
@@ -107,21 +113,32 @@ export class MatchService {
   private windowCounters = new Map<string, number>() // matchId -> windowId counter
   private simulWindowMs = parseInt(process.env.SIMUL_WINDOW_MS || '500', 10)
   private simulStarterAlternation = process.env.SIMUL_STARTER_ALTERNATION === 'true'
+  private gameType: 'tictactoe' | 'gameofstrife' | 'backgammon'
 
   constructor() {
     // Initialize engine based on ENGINE_KIND (default to tictactoe)
     const engineKind = process.env.ENGINE_KIND || 'tictactoe'
+
+    // Debug logging
+    console.log('DEBUG: ENGINE_KIND env var:', process.env.ENGINE_KIND)
+    console.log('DEBUG: Resolved engineKind:', engineKind)
+
     if (engineKind === 'tictactoe') {
       this.engine = new TicTacToeEngine()
+      this.gameType = 'tictactoe'
+    } else if (engineKind === 'gameofstrife') {
+      this.engine = new GameOfStrifeEngine()
+      this.gameType = 'gameofstrife'
     } else {
       // Default to tictactoe for any unknown engine types
       this.engine = new TicTacToeEngine()
+      this.gameType = 'tictactoe'
     }
-    
+
     // Log engine selection
     console.log(JSON.stringify({
       evt: 'engine.selected',
-      kind: 'tictactoe'
+      kind: engineKind
     }))
   }
 
@@ -159,7 +176,8 @@ export class MatchService {
     
     // Initialize game state using engine
     const engineState = this.engine.initState()
-    
+    const extendedEngineState = engineState as any
+
     const match: MatchState = {
       id: matchId,
       roomId,
@@ -174,7 +192,9 @@ export class MatchService {
       winner: engineState.winner,
       winningLine: engineState.winningLine,
       startedAt: new Date(),
-      finishedAt: engineState.finishedAt
+      finishedAt: engineState.finishedAt,
+      gameType: this.gameType, // Include game type in match state
+      engineState: extendedEngineState.engineState || engineState // Store full engine state
     }
 
     this.matches.set(matchId, match)
@@ -295,8 +315,8 @@ export class MatchService {
         return { success: false, reason: 'cap_reached' }
       }
 
-      // Validate using engine (but skip turn validation for simul mode)
-      const engineState = {
+      // Use stored engine state or create minimal state for validation
+      const engineState = match.engineState || {
         board: match.board,
         currentTurn: match.currentTurn,
         winner: match.winner,
@@ -331,8 +351,8 @@ export class MatchService {
   private handleTurnBasedClaim(match: MatchState, request: ClaimRequest, playerSeat: 'P1' | 'P2', selections: Set<string>): ClaimResult {
     const { matchId, squareId, selectionId, playerId } = request
 
-    // Create engine state from match
-    const engineState = {
+    // Use stored engine state or create minimal state
+    const engineState = match.engineState || {
       board: match.board,
       currentTurn: match.currentTurn,
       winner: match.winner,
@@ -350,11 +370,22 @@ export class MatchService {
 
     // Apply claim using engine
     const claimApplication = this.engine.applyClaim(engineState, playerSeat, squareId)
-    
+
     // Update match state with engine results
     match.board = claimApplication.board
     match.version = claimApplication.version
     match.currentTurn = claimApplication.nextTurn
+
+    // Update stored engine state if available
+    if (claimApplication.engineState) {
+      // Use the full engine state returned by the engine
+      match.engineState = claimApplication.engineState
+    } else if (match.engineState) {
+      // Fallback: update basic fields only
+      match.engineState.version = claimApplication.version
+      match.engineState.currentTurn = claimApplication.nextTurn
+    }
+
     selections.add(selectionId)
 
     const move: Move = {
@@ -369,11 +400,13 @@ export class MatchService {
     this.updateRateLimit(matchId, playerId, selectionId)
 
     // Check for game result using engine
-    const updatedEngineState = {
-      ...engineState,
+    const updatedEngineState = match.engineState || {
       board: claimApplication.board,
+      currentTurn: claimApplication.nextTurn,
+      winner: match.winner,
+      winningLine: match.winningLine,
       version: claimApplication.version,
-      currentTurn: claimApplication.nextTurn
+      finishedAt: match.finishedAt
     }
     const gameResult = this.engine.checkResult(updatedEngineState)
     if (gameResult.status === 'finished') {
@@ -400,10 +433,13 @@ export class MatchService {
       this.logClaimDecision({ evt: 'claim', matchId, squareId, seat: playerSeat, version: match.version })
     }
 
+    // Prepare match state with Game of Strife metadata if applicable
+    const matchStateToReturn = this.enrichMatchStateWithMetadata({ ...match })
+
     return {
       success: true,
       move,
-      matchState: { ...match },
+      matchState: matchStateToReturn,
       nextTurn: match.status === 'active' && match.currentTurn ? match.currentTurn : undefined,
     }
   }
@@ -444,7 +480,7 @@ export class MatchService {
         selectionId,
         timestamp: new Date()
       },
-      matchState: { ...match }
+      matchState: this.enrichMatchStateWithMetadata({ ...match })
     }
   }
 
@@ -898,5 +934,37 @@ export class MatchService {
 
   getActiveMatches(): MatchState[] {
     return Array.from(this.matches.values()).filter(m => m.status === 'active')
+  }
+
+  /**
+   * Enriches match state with game-specific metadata for frontend consumption
+   */
+  private enrichMatchStateWithMetadata(matchState: MatchState): MatchState {
+    // For Game of Strife, add metadata that frontend bridge expects
+    if (matchState.gameType === 'gameofstrife' && matchState.engineState) {
+      const engineState = matchState.engineState as any
+
+      // Extract Game of Strife specific data from engine state
+      const metadata = {
+        stage: engineState.currentPhase || 'placement',
+        generation: engineState.generation || 0,
+        playerTokens: engineState.playerTokens || {
+          player0: 10, // Default token count
+          player1: 10
+        },
+        boardSize: engineState.boardSize || 20,
+        simulationSpeed: engineState.simulationSpeed || 200,
+        simulationRunning: engineState.simulationRunning || false
+      }
+
+      // Add metadata to match state
+      return {
+        ...matchState,
+        metadata
+      }
+    }
+
+    // For other game types, return as-is
+    return matchState
   }
 }
