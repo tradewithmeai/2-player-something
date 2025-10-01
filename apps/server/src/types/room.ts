@@ -60,4 +60,5 @@ export interface ClientToServerEvents {
   playerReady: (ready: boolean) => void
   ping: () => void
   claimSquare: (data: { matchId: string; squareId: number; selectionId: string }) => void
+  rematch: (data: { matchId: string }) => void
 }

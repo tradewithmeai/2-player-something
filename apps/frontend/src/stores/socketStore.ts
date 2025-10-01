@@ -42,6 +42,7 @@ export interface MatchState {
   winningLine: number[] | null
   startedAt: Date
   finishedAt?: Date
+  gameType?: 'tictactoe' | 'gameofstrife' | 'backgammon' // Game type from server
 }
 
 export interface Move {
@@ -85,9 +86,16 @@ interface SocketState {
   
   // Rematch state
   rematchPending: boolean
+  rematchRequesterSeat: 'P1' | 'P2' | null
   
   // UI feedback
   matchFinishedNotice: string | null // For showing "Round finished" messages
+  
+  // Simul mode state
+  matchMode: 'turn' | 'simul' // UI hint from env
+  currentWindowId: number | null
+  windowDeadline: number | null // timestamp
+  pendingSimulClaims: Map<'P1' | 'P2', { squareId: number; selectionId: string }> // seat -> pending claim
   
   // Legacy testing
   lastPong: string | null
@@ -105,10 +113,42 @@ interface SocketState {
   setPlayerReady: (ready: boolean) => void
   claimSquare: (squareId: number) => void
   requestRematch: () => void
+  acceptRematch: () => void
 }
 
-const SERVER_URL = import.meta.env.VITE_WS_URL || 'http://localhost:8002'
+const SERVER_URL = import.meta.env.VITE_WS_URL || 'http://localhost:8890'
 const NAMESPACE = '/game'
+
+// Store helper functions
+export const getMySeat = (state: SocketState): 'P1' | 'P2' | null => {
+  return state.mySeat
+}
+
+export const getOppSeat = (state: SocketState): 'P1' | 'P2' | null => {
+  if (state.mySeat === 'P1') return 'P2'
+  if (state.mySeat === 'P2') return 'P1'
+  return null
+}
+
+export const getSymbol = (seat: 'P1' | 'P2' | null): string => {
+  if (seat === 'P1') return 'X'
+  if (seat === 'P2') return 'O'
+  return '—'
+}
+
+export const getPlayerShortId = (state: SocketState, seat: 'P1' | 'P2' | null): string => {
+  if (!seat || !state.currentMatch?.players) return '—'
+  
+  // Find player by seat (looking for seat property if available)
+  const player = state.currentMatch.players.find((p: any) => 
+    p.seat === seat || 
+    // Fallback: if no seat property, use positional logic
+    (seat === 'P1' && state.currentMatch?.players.indexOf(p) === 0) ||
+    (seat === 'P2' && state.currentMatch?.players.indexOf(p) === 1)
+  )
+  
+  return player?.id?.slice(-6) || '—'
+}
 
 // Store instance reference for handler access
 let storeInstance: any = null
@@ -235,8 +275,10 @@ const onMatchStart = (data: Match & { matchId?: string; mySeat?: 'P1' | 'P2'; cu
     gameInputLocked: false,
     isFinished: false,
     rematchPending: false,
+    rematchRequesterSeat: null,
     matchFinishedNotice: null,
-    pendingClaims: new Map()
+    pendingClaims: new Map(),
+    pendingSimulClaims: new Map()
   })
   
   // Log structured matchStart event
@@ -247,6 +289,14 @@ const onMatchStart = (data: Match & { matchId?: string; mySeat?: 'P1' | 'P2'; cu
     currentTurn: data.currentTurn || 'P1',
     playersWithSeats: normalizedPlayers.length
   }))
+  
+  // If this is a rematch (new match starting), log rematch started
+  if (storeInstance.getState().rematchPending) {
+    console.log(JSON.stringify({
+      evt: 'frontend.rematch.started',
+      matchId: data.matchId
+    }))
+  }
 }
 
 const onSquareClaimed = (data: { matchId: string; squareId: number; by: string; version: number; nextTurn?: string }) => {
@@ -329,16 +379,28 @@ const onSquareClaimed = (data: { matchId: string; squareId: number; by: string; 
   }
 }
 
-const onClaimRejected = (data: { matchId: string; squareId: number; reason: string; selectionId: string }) => {
-  console.log('Claim rejected:', data)
+const onClaimRejected = (data: any) => {
+  // Type assertion for Socket.IO event data
+  const typedData = data as { matchId: string; squareId: number; reason: string; selectionId: string }
+  console.log('Claim rejected:', typedData)
   const state = storeInstance.getState()
   
   // Remove the rejected pending claim
   const updatedPendingClaims = new Map(state.pendingClaims)
-  updatedPendingClaims.delete(data.selectionId)
+  updatedPendingClaims.delete(typedData.selectionId)
+  
+  // For simul mode, also clear pending simul claims if it matches
+  const updatedPendingSimulClaims = new Map(state.pendingSimulClaims)
+  if (state.mySeat) {
+    const myPendingClaim = updatedPendingSimulClaims.get(state.mySeat) as { squareId: number; selectionId: string } | undefined
+    if (myPendingClaim && myPendingClaim.squareId === typedData.squareId) {
+      updatedPendingSimulClaims.delete(state.mySeat)
+    }
+  }
   
   storeInstance.setState({
-    pendingClaims: updatedPendingClaims
+    pendingClaims: updatedPendingClaims,
+    pendingSimulClaims: updatedPendingSimulClaims
   })
   
   // Handle different rejection reasons
@@ -347,6 +409,9 @@ const onClaimRejected = (data: { matchId: string; squareId: number; reason: stri
     // TODO: Add visual flash effect
   } else if (data.reason === 'not_your_turn') {
     console.log('Not your turn!')
+  } else if (data.reason === 'conflict_lost') {
+    console.log('Claim conflict - lost to opponent!')
+    // TODO: Add "taken" flash effect for simul mode
   } else if (data.reason === 'match_finished') {
     console.log('Match finished - no more moves allowed!')
     // Lock the UI immediately and show notice
@@ -506,9 +571,66 @@ const onPong = (data: any) => {
   })
 }
 
-const onRematchPending = (data: any) => {
+const onRematchPending = (data: { matchId: string; requesterSeat: 'P1' | 'P2' }) => {
   console.log('Rematch pending:', data)
-  storeInstance.setState({ rematchPending: true })
+  
+  storeInstance.setState({ 
+    rematchPending: true, 
+    rematchRequesterSeat: data.requesterSeat 
+  })
+  
+  console.log(JSON.stringify({
+    evt: 'frontend.rematch.pending',
+    requesterSeat: data.requesterSeat
+  }))
+}
+
+const onRematchTimeout = (data: { matchId: string }) => {
+  console.log('Rematch timeout:', data)
+  
+  storeInstance.setState({ 
+    rematchPending: false,
+    rematchRequesterSeat: null 
+  })
+  
+  console.log(JSON.stringify({
+    evt: 'frontend.rematch.timeout',
+    matchId: data.matchId
+  }))
+}
+
+const onWindowOpen = (data: { matchId: string; windowId: number; starterSeat: 'P1' | 'P2'; deadlineTs: number }) => {
+  console.log('Window opened:', data)
+  
+  storeInstance.setState({
+    currentWindowId: data.windowId,
+    windowDeadline: data.deadlineTs
+  })
+  
+  console.log(JSON.stringify({
+    evt: 'frontend.window.open',
+    windowId: data.windowId,
+    starterSeat: data.starterSeat,
+    deadline: data.deadlineTs
+  }))
+}
+
+const onWindowClose = (data: { matchId: string; windowId: number; applied: any[]; rejected: any[] }) => {
+  console.log('Window closed:', data)
+  
+  // Clear pending simul claims
+  storeInstance.setState({
+    currentWindowId: null,
+    windowDeadline: null,
+    pendingSimulClaims: new Map()
+  })
+  
+  console.log(JSON.stringify({
+    evt: 'frontend.window.close',
+    windowId: data.windowId,
+    applied: data.applied.length,
+    rejected: data.rejected.length
+  }))
 }
 
 const onMatchStateUpdate = (data: { matchId: string; matchState: MatchState; version: number }) => {
@@ -545,53 +667,65 @@ const onMatchStateUpdate = (data: { matchId: string; matchState: MatchState; ver
   })
 }
 
+// List of all events for handler management
+const SOCKET_EVENTS = [
+  'connect', 'disconnect', 'connect_error', 'welcome', 'quickMatchFound', 
+  'roomUpdate', 'matchStart', 'squareClaimed', 'claimRejected', 'stateSync',
+  'matchStateUpdate', 'result', 'gameResult', 'roomJoined', 'roomLeft',
+  'publicRooms', 'error', 'pong', 'rematchPending', 'rematchTimeout', 'windowOpen', 'windowClose'
+] as const
+
+// Event to handler mapping
+const EVENT_HANDLERS = {
+  'connect': onConnect,
+  'disconnect': onDisconnect,
+  'connect_error': onConnectError,
+  'welcome': onWelcome,
+  'quickMatchFound': onQuickMatchFound,
+  'roomUpdate': onRoomUpdate,
+  'matchStart': onMatchStart,
+  'squareClaimed': onSquareClaimed,
+  'claimRejected': onClaimRejected,
+  'stateSync': onStateSync,
+  'matchStateUpdate': onMatchStateUpdate,
+  'result': onResult,
+  'gameResult': onGameResult,
+  'roomJoined': onRoomJoined,
+  'roomLeft': onRoomLeft,
+  'publicRooms': onPublicRooms,
+  'error': onError,
+  'pong': onPong,
+  'rematchPending': onRematchPending,
+  'rematchTimeout': onRematchTimeout,
+  'windowOpen': onWindowOpen,
+  'windowClose': onWindowClose
+} as const
+
 // Handler management utilities
 const detachAllHandlers = (socket: Socket) => {
   if (!socket) return
   
-  socket.off('connect', onConnect)
-  socket.off('disconnect', onDisconnect)
-  socket.off('connect_error', onConnectError)
-  socket.off('welcome', onWelcome)
-  socket.off('quickMatchFound', onQuickMatchFound)
-  socket.off('roomUpdate', onRoomUpdate)
-  socket.off('matchStart', onMatchStart)
-  socket.off('squareClaimed', onSquareClaimed)
-  socket.off('claimRejected', onClaimRejected)
-  socket.off('stateSync', onStateSync)
-  socket.off('matchStateUpdate', onMatchStateUpdate)
-  socket.off('result', onResult)
-  socket.off('gameResult', onGameResult)
-  socket.off('roomJoined', onRoomJoined)
-  socket.off('roomLeft', onRoomLeft)
-  socket.off('publicRooms', onPublicRooms)
-  socket.off('error', onError)
-  socket.off('pong', onPong)
-  socket.off('rematchPending', onRematchPending)
+  SOCKET_EVENTS.forEach(event => {
+    socket.off(event, EVENT_HANDLERS[event])
+  })
+  
+  console.log(JSON.stringify({
+    evt: 'frontend.handlers.detached',
+    events: SOCKET_EVENTS
+  }))
 }
 
 const attachAllHandlers = (socket: Socket) => {
   if (!socket) return
   
-  socket.on('connect', onConnect)
-  socket.on('disconnect', onDisconnect)
-  socket.on('connect_error', onConnectError)
-  socket.on('welcome', onWelcome)
-  socket.on('quickMatchFound', onQuickMatchFound)
-  socket.on('roomUpdate', onRoomUpdate)
-  socket.on('matchStart', onMatchStart)
-  socket.on('squareClaimed', onSquareClaimed)
-  socket.on('claimRejected', onClaimRejected)
-  socket.on('stateSync', onStateSync)
-  socket.on('matchStateUpdate', onMatchStateUpdate)
-  socket.on('result', onResult)
-  socket.on('gameResult', onGameResult)
-  socket.on('roomJoined', onRoomJoined)
-  socket.on('roomLeft', onRoomLeft)
-  socket.on('publicRooms', onPublicRooms)
-  socket.on('error', onError)
-  socket.on('pong', onPong)
-  socket.on('rematchPending', onRematchPending)
+  SOCKET_EVENTS.forEach(event => {
+    socket.on(event, EVENT_HANDLERS[event])
+  })
+  
+  console.log(JSON.stringify({
+    evt: 'frontend.handlers.attached',
+    events: SOCKET_EVENTS
+  }))
 }
 
 export const useSocketStore = create<SocketState>((set, get) => {
@@ -615,7 +749,12 @@ export const useSocketStore = create<SocketState>((set, get) => {
   gameInputLocked: false,
   isFinished: false,
   rematchPending: false,
+  rematchRequesterSeat: null,
   matchFinishedNotice: null,
+  matchMode: (import.meta.env.VITE_MATCH_MODE || 'turn') as 'turn' | 'simul',
+  currentWindowId: null,
+  windowDeadline: null,
+  pendingSimulClaims: new Map(),
   lastPong: null,
   serverTime: null,
 
@@ -638,22 +777,11 @@ export const useSocketStore = create<SocketState>((set, get) => {
       reconnectionAttempts: 5,
     })
 
-    // Log all incoming events for diagnostics
+    // Log outgoing events for diagnostics (keep emit wrapper but not on wrapper)
     const originalEmit = socket.emit.bind(socket)
     socket.emit = function(event: string, ...args: any[]) {
       console.log(`[Socket→Server] ${event}:`, args)
       return originalEmit(event, ...args)
-    }
-    
-    const originalOn = socket.on.bind(socket)
-    socket.on = function(event: string, handler: (...args: any[]) => void) {
-      const wrappedHandler = (...args: any[]) => {
-        if (event !== 'connect' && event !== 'disconnect') {
-          console.log(`[Server→Socket] ${event}:`, args)
-        }
-        handler(...args)
-      }
-      return originalOn(event, wrappedHandler)
     }
 
     // Single-attach guard: detach existing handlers if already attached
@@ -663,14 +791,6 @@ export const useSocketStore = create<SocketState>((set, get) => {
     
     // Attach all handlers using stable refs
     attachAllHandlers(socket)
-    
-    // Log handler attachment exactly once
-    console.log(JSON.stringify({
-      evt: 'frontend.handlers.attached',
-      result: true,
-      stateSync: true,
-      squareClaimed: true
-    }))
 
     set({ socket, handlersAttached: true })
   },
@@ -772,7 +892,7 @@ export const useSocketStore = create<SocketState>((set, get) => {
   },
 
   claimSquare: (squareId: number) => {
-    const { socket, isConnected, matchState, playerId, isFinished, mySeat } = get()
+    const { socket, isConnected, matchState, playerId, isFinished, mySeat, matchMode, pendingSimulClaims } = get()
     
     // No-op guards per requirements
     if (isFinished) {
@@ -785,29 +905,42 @@ export const useSocketStore = create<SocketState>((set, get) => {
       return
     }
     
-    if (mySeat !== matchState.currentTurn) {
-      console.log('claimSquare no-op: not my turn')
-      return
-    }
-    
     if (matchState.board[squareId] !== null) {
       console.log('claimSquare no-op: square already occupied')
       return
     }
     
-    if (socket && isConnected && matchState && playerId) {
+    // Mode-specific checks
+    if (matchMode === 'turn') {
+      // Turn-based: check if it's player's turn
+      if (mySeat !== matchState.currentTurn) {
+        console.log('claimSquare no-op: not my turn (turn mode)')
+        return
+      }
+    } else {
+      // Simul mode: allow claims anytime but track pending
+    }
+    
+    if (socket && isConnected && matchState && playerId && mySeat) {
       const selectionId = `claim_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
       
-      // Add pending claim
-      const pendingClaim: PendingClaim = {
-        squareId,
-        selectionId,
-        timestamp: new Date()
+      if (matchMode === 'simul') {
+        // Simul mode: store pending claim per seat
+        const updatedPendingSimulClaims = new Map(pendingSimulClaims)
+        updatedPendingSimulClaims.set(mySeat, { squareId, selectionId })
+        set({ pendingSimulClaims: updatedPendingSimulClaims })
+      } else {
+        // Turn mode: use legacy pending claims
+        const pendingClaim: PendingClaim = {
+          squareId,
+          selectionId,
+          timestamp: new Date()
+        }
+        
+        const updatedPendingClaims = new Map(get().pendingClaims)
+        updatedPendingClaims.set(selectionId, pendingClaim)
+        set({ pendingClaims: updatedPendingClaims })
       }
-      
-      const updatedPendingClaims = new Map(get().pendingClaims)
-      updatedPendingClaims.set(selectionId, pendingClaim)
-      set({ pendingClaims: updatedPendingClaims })
       
       // Send claim to server
       socket.emit('claimSquare', {
@@ -816,7 +949,7 @@ export const useSocketStore = create<SocketState>((set, get) => {
         selectionId
       })
       
-      console.log(`Claiming square ${squareId} with selectionId ${selectionId}`)
+      console.log(`Claiming square ${squareId} with selectionId ${selectionId} (mode: ${matchMode})`)
     }
   },
 
@@ -825,7 +958,19 @@ export const useSocketStore = create<SocketState>((set, get) => {
     if (socket && isConnected && matchState && matchState.status === 'finished') {
       console.log('Requesting rematch for match:', matchState.id)
       socket.emit('rematch', { matchId: matchState.id })
-      set({ rematchPending: true })
+      // Don't set rematchPending here - let the server broadcast handle it
+    }
+  },
+
+  acceptRematch: () => {
+    const { socket, isConnected, matchState } = get()
+    if (socket && isConnected && matchState && matchState.status === 'finished') {
+      console.log('Accepting rematch for match:', matchState.id)
+      socket.emit('rematch', { matchId: matchState.id })
+      
+      console.log(JSON.stringify({
+        evt: 'frontend.rematch.accepted'
+      }))
     }
   },
 

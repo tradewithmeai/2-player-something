@@ -1,32 +1,35 @@
 import React from 'react'
-import { useSocketStore, Match } from '../stores/socketStore'
-import { TicTacToeBoard } from './TicTacToeBoard'
+import { useSocketStore, Match, getMySeat, getOppSeat, getSymbol, getPlayerShortId } from '../stores/socketStore'
+import { DynamicGameComponent } from './DynamicGameComponent'
 
 interface MatchScreenProps {
   match: Match
 }
 
 export const MatchScreen: React.FC<MatchScreenProps> = ({ match }) => {
-  const { leaveRoom, matchState, mySeat } = useSocketStore()
+  const { leaveRoom, matchState } = useSocketStore()
   
   const currentPlayerId = useSocketStore(state => state.socket?.id)
   
-  // Safely compute opponent from store state
+  // Use store helpers for seat management
+  const state = useSocketStore.getState()
+  const mySeat = getMySeat(state)
+  const oppSeat = getOppSeat(state)
+  const mySym = getSymbol(mySeat)
+  const oppSym = getSymbol(oppSeat)
+  
+  console.log('🪑 MatchScreen seat debug:', { mySeat, oppSeat, mySym, oppSym })
+  
+  // Safely compute players from store state
   const players = match.players || []
   const currentPlayer = players.find(p => p.id === currentPlayerId)
   
-  // Derive opponent seat and find opponent safely
-  const opponentSeat = mySeat === 'P1' ? 'P2' : 'P1'
-  const opponent = players.find(p => 
-    // First try to find by seat if seats are available
-    (p as any).seat === opponentSeat ||
-    // Fallback: find by "not me"
-    (p.id !== currentPlayerId)
-  )
+  // Find opponent safely
+  const opponent = players.find(p => p.id !== currentPlayerId)
   
-  // Safe opponent ID extraction
-  const opponentId = opponent?.id
-  const opponentDisplay = opponentId?.slice(-6) ?? '—'
+  // Use store helper for player ID display
+  const myShort = getPlayerShortId(state, mySeat)
+  const oppShort = getPlayerShortId(state, oppSeat)
 
   const formatDate = (date: string | Date | undefined) => {
     if (!date) return 'Unknown'
@@ -75,10 +78,10 @@ export const MatchScreen: React.FC<MatchScreenProps> = ({ match }) => {
             {currentPlayer && (
               <div className="bg-blue-900 bg-opacity-50 rounded-lg p-4 border border-blue-500 text-center">
                 <div className="w-12 h-12 bg-blue-500 rounded-full mx-auto mb-3 flex items-center justify-center">
-                  <span className="text-white font-bold text-lg">Y</span>
+                  <span className="text-white font-bold text-lg">{mySym}</span>
                 </div>
-                <p className="text-white font-medium">You</p>
-                <p className="text-blue-400 text-sm">Player 1</p>
+                <p className="text-white font-medium">You: {mySeat ?? '—'} ({mySym ?? '—'})</p>
+                <p className="text-blue-400 text-sm">{myShort}</p>
               </div>
             )}
 
@@ -86,18 +89,18 @@ export const MatchScreen: React.FC<MatchScreenProps> = ({ match }) => {
             {opponent && (
               <div className="bg-red-900 bg-opacity-50 rounded-lg p-4 border border-red-500 text-center">
                 <div className="w-12 h-12 bg-red-500 rounded-full mx-auto mb-3 flex items-center justify-center">
-                  <span className="text-white font-bold text-lg">O</span>
+                  <span className="text-white font-bold text-lg">{oppSym}</span>
                 </div>
-                <p className="text-white font-medium">Opponent</p>
-                <p className="text-red-400 text-sm">Player {opponentDisplay}</p>
+                <p className="text-white font-medium">Opponent: {oppSeat ?? '—'} ({oppSym ?? '—'})</p>
+                <p className="text-red-400 text-sm">{oppShort}</p>
               </div>
             )}
           </div>
         </div>
 
-        {/* Tic-Tac-Toe Game Board */}
+        {/* Dynamic Game Component */}
         <div className="bg-gray-800 rounded-lg p-8 text-center">
-          <TicTacToeBoard />
+          <DynamicGameComponent showDebugInfo={import.meta.env.DEV} />
         </div>
 
         {/* Match Actions */}

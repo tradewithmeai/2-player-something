@@ -1,20 +1,42 @@
-import { useSocketStore } from '../stores/socketStore'
+import { useSocketStore, getMySeat, getSymbol } from '../stores/socketStore'
+import { GameProps } from './GameRegistry'
 
-interface TicTacToeBoardProps {
+interface TicTacToeBoardProps extends Partial<GameProps> {
   className?: string
 }
 
-export function TicTacToeBoard({ className = '' }: TicTacToeBoardProps) {
+export function TicTacToeBoard({
+  className = '',
+  matchState: propMatchState,
+  mySeat: propMySeat,
+  isMyTurn: propIsMyTurn,
+  onAction: propOnAction,
+  onRematch: propOnRematch
+}: TicTacToeBoardProps) {
+  // Use props if provided, otherwise fall back to store
+  const store = useSocketStore()
   const {
-    matchState,
+    matchState: storeMatchState,
     pendingClaims,
-    mySeat,
+    pendingSimulClaims,
+    mySeat: storeMySeat,
     rematchPending,
+    rematchRequesterSeat,
     isFinished,
     matchFinishedNotice,
-    claimSquare,
-    requestRematch
-  } = useSocketStore()
+    matchMode,
+    currentWindowId,
+    windowDeadline,
+    claimSquare: storeClaimSquare,
+    requestRematch: storeRequestRematch,
+    acceptRematch
+  } = store
+
+  // Use props if provided, otherwise use store values
+  const matchState = propMatchState || storeMatchState
+  const mySeat = propMySeat || storeMySeat
+  const claimSquare = propOnAction || storeClaimSquare
+  const requestRematch = propOnRematch || storeRequestRematch
 
   if (!matchState) {
     return (
@@ -24,7 +46,7 @@ export function TicTacToeBoard({ className = '' }: TicTacToeBoardProps) {
     )
   }
 
-  const isMyTurn = matchState.currentTurn === mySeat
+  const isMyTurn = propIsMyTurn !== undefined ? propIsMyTurn : (matchState.currentTurn === mySeat)
   const isGameFinished = isFinished
 
   const getSquareState = (squareIndex: number) => {
@@ -37,13 +59,25 @@ export function TicTacToeBoard({ className = '' }: TicTacToeBoardProps) {
       }
     }
 
-    // Check if square has pending claim
-    const hasPendingClaim = Array.from(pendingClaims.values()).some(claim => claim.squareId === squareIndex)
-    if (hasPendingClaim) {
-      return {
-        type: 'pending' as const,
-        player: mySeat,
-        isPending: true
+    if (matchMode === 'simul') {
+      // Simul mode: check if we have a pending claim for this square
+      const myPendingClaim = mySeat ? pendingSimulClaims.get(mySeat) : null
+      if (myPendingClaim && myPendingClaim.squareId === squareIndex) {
+        return {
+          type: 'pending' as const,
+          player: mySeat,
+          isPending: true
+        }
+      }
+    } else {
+      // Turn mode: check legacy pending claims
+      const hasPendingClaim = Array.from(pendingClaims.values()).some(claim => claim.squareId === squareIndex)
+      if (hasPendingClaim) {
+        return {
+          type: 'pending' as const,
+          player: mySeat,
+          isPending: true
+        }
       }
     }
 
@@ -55,7 +89,10 @@ export function TicTacToeBoard({ className = '' }: TicTacToeBoardProps) {
   }
 
   const handleSquareClick = (squareIndex: number) => {
-    if (isGameFinished || !isMyTurn) return
+    if (isGameFinished) return
+    
+    // Mode-specific turn checking
+    if (matchMode === 'turn' && !isMyTurn) return
     
     const squareState = getSquareState(squareIndex)
     if (squareState.type !== 'empty') return
@@ -91,7 +128,12 @@ export function TicTacToeBoard({ className = '' }: TicTacToeBoardProps) {
   const getSquareClasses = (squareIndex: number) => {
     const baseClasses = 'w-20 h-20 border-2 border-gray-300 flex items-center justify-center cursor-pointer transition-all duration-200'
     
-    if (isGameFinished || !isMyTurn) {
+    if (isGameFinished) {
+      return `${baseClasses} cursor-not-allowed bg-gray-50`
+    }
+
+    // Mode-specific turn checking
+    if (matchMode === 'turn' && !isMyTurn) {
       return `${baseClasses} cursor-not-allowed bg-gray-50`
     }
 
@@ -124,9 +166,19 @@ export function TicTacToeBoard({ className = '' }: TicTacToeBoardProps) {
             {/* Rematch button */}
             <div className="flex justify-center">
               {rematchPending ? (
-                <div className="bg-yellow-500 text-white px-6 py-2 rounded-lg font-medium">
-                  Waiting for opponent...
-                </div>
+                // Show different UI based on who requested rematch
+                rematchRequesterSeat === mySeat ? (
+                  <div className="bg-yellow-500 text-white px-6 py-2 rounded-lg font-medium">
+                    Waiting for opponent...
+                  </div>
+                ) : (
+                  <button
+                    onClick={acceptRematch}
+                    className="bg-green-600 hover:bg-green-700 text-white px-6 py-2 rounded-lg font-medium transition-colors"
+                  >
+                    Accept Rematch
+                  </button>
+                )
               ) : (
                 <button
                   onClick={requestRematch}
@@ -140,14 +192,37 @@ export function TicTacToeBoard({ className = '' }: TicTacToeBoardProps) {
         ) : (
           <div className="space-y-2">
             <div className="text-sm text-gray-600">
-              You are: {mySeat === 'P1' ? 'X (P1)' : 'O (P2)'}
+              You are: {getSymbol(getMySeat(useSocketStore.getState()))} ({getMySeat(useSocketStore.getState()) ?? '—'})
             </div>
-            <div className="text-lg font-semibold">
-              Turn: {matchState.currentTurn}
-            </div>
+            {matchMode === 'simul' ? (
+              <div className="text-lg font-semibold">
+                Simultaneous Mode
+                {currentWindowId && (
+                  <div className="text-sm text-gray-600">
+                    Window #{currentWindowId}
+                    {windowDeadline && (
+                      <span className="ml-2 text-xs">
+                        {Math.max(0, Math.ceil((windowDeadline - Date.now()) / 1000))}s
+                      </span>
+                    )}
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div className="text-lg font-semibold">
+                Turn: {matchState.currentTurn}
+              </div>
+            )}
           </div>
         )}
       </div>
+
+      {/* Simul mode badge */}
+      {matchMode === 'simul' && !isGameFinished && (
+        <div className="bg-purple-100 border border-purple-400 text-purple-700 px-3 py-1 rounded-lg text-xs text-center">
+          🔀 Simultaneous mode - Both players can select
+        </div>
+      )}
 
       {/* Match finished notice */}
       {matchFinishedNotice && (
